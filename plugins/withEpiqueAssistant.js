@@ -24,9 +24,14 @@ import expo.modules.ReactActivityDelegateWrapper
 
 /** Hosts the "assistant" React root over whatever app the user was in. */
 class AssistantActivity : ReactActivity() {
+  companion object {
+    @Volatile var current: AssistantActivity? = null
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     setTheme(R.style.AssistantTheme)
     super.onCreate(null)
+    current = this
   }
 
   override fun getMainComponentName(): String = "assistant"
@@ -41,6 +46,19 @@ class AssistantActivity : ReactActivity() {
   // JS closes the assistant with BackHandler.exitApp(); finish this activity instead of backgrounding the task.
   override fun invokeDefaultOnBackPressed() {
     finish()
+  }
+
+  // The overlay must never outlive its moment: once the user leaves it (home, recents, another app) it is gone.
+  // A lingering transparent activity is what used to sit invisibly on top of the screen and eat touches.
+  override fun onStop() {
+    super.onStop()
+    if (!isChangingConfigurations) finish()
+  }
+
+  override fun onDestroy() {
+    if (current === this) current = null
+    runCatching { EpiqueVoiceInteractionSession.current?.hide() }
+    super.onDestroy()
   }
 }
 `,
@@ -73,15 +91,25 @@ import java.io.FileOutputStream
 import kotlin.concurrent.thread
 
 class EpiqueVoiceInteractionSession(context: Context) : VoiceInteractionSession(context) {
+  companion object {
+    @Volatile var current: EpiqueVoiceInteractionSession? = null
+  }
+
   private val shot: File get() = File(context.cacheDir, "assist_screen.jpg")
 
   override fun onShow(args: Bundle?, showFlags: Int) {
     super.onShow(args, showFlags)
+    current = this
     // Drop any screenshot from a previous invocation so the model never sees stale content.
     runCatching { shot.delete() }
     // The system's own session window stays empty; our UI lives in AssistantActivity.
     setUiEnabled(false)
     startAssistantActivity(Intent(context, AssistantActivity::class.java))
+  }
+
+  override fun onDestroy() {
+    if (current === this) current = null
+    super.onDestroy()
   }
 
   // Delivered only when the user enabled "Use screenshot" for the default assistant.
@@ -201,6 +229,8 @@ module.exports = function withEpiqueAssistant(config) {
           'android:exported': 'true',
           'android:theme': '@style/AssistantTheme',
           'android:launchMode': 'singleTask',
+          'android:noHistory': 'true',
+          'android:clearTaskOnLaunch': 'true',
           'android:taskAffinity': '',
           'android:excludeFromRecents': 'true',
           'android:showWhenLocked': 'true',

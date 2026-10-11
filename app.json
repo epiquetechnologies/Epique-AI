@@ -44,7 +44,8 @@
             "com.google.android.as"
           ]
         }
-      ]
+      ],
+      "expo-sqlite"
     ]
   }
 }

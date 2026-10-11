@@ -11,13 +11,44 @@ type Actions = {
   permissions?: (p: { audio?: boolean; video?: boolean }) => Promise<boolean>;
   close?: () => Promise<void>;
   openSettings?: () => Promise<void>;
+  openApp?: () => Promise<void>;
+  persist?: (key: string, value: string | null) => Promise<void>;
 };
 
 export const actions: Actions = {};
 export const setActions = (a: Actions) => { Object.assign(actions, a); };
 
 const w: any = typeof window !== "undefined" ? window : null;
-const inHost = !!(w && w.ReactNativeWebView);
+const inHost = !!(w && (w.ReactNativeWebView || w.ExpoDomWebViewBridge || /; wv\)/.test(navigator.userAgent || "")));
+
+
+/**
+ * Persistent storage. The WebView's own localStorage is not reliable here (it is per-WebView, so the main app and the
+ * assistant overlay never saw each other's keys, and it can be wiped), so when the native host hands us a snapshot we
+ * replace window.localStorage with a shim that is backed by native storage (SQLite key-value store).
+ */
+let storageReady = false;
+export const installStorage = (json?: string) => {
+  if (storageReady || !w || json === undefined) return;
+  storageReady = true;
+  const keep = new Map<string, string>();
+  try { const d = JSON.parse(json || "{}"); for (const k of Object.keys(d)) if (typeof d[k] === "string") keep.set(k, d[k]); } catch (e) {}
+  const save = (k: string, v: string | null) => { try { const r = actions.persist?.(k, v); if (r && (r as any).catch) (r as any).catch(() => {}); } catch (e) {} };
+  // One-time migration: keep anything an older build left in the WebView's own storage.
+  try {
+    const real = w.localStorage;
+    for (let i = 0; real && i < real.length; i++) { const k = real.key(i); if (k && !keep.has(k)) { const v = real.getItem(k); if (v != null) { keep.set(k, v); save(k, v); } } }
+  } catch (e) {}
+  const shim = {
+    getItem: (k: any) => (keep.has(String(k)) ? (keep.get(String(k)) as string) : null),
+    setItem: (k: any, v: any) => { const key = String(k), val = String(v); keep.set(key, val); save(key, val); },
+    removeItem: (k: any) => { const key = String(k); keep.delete(key); save(key, null); },
+    clear: () => { for (const k of [...keep.keys()]) save(k, null); keep.clear(); },
+    key: (i: number) => [...keep.keys()][i] ?? null,
+    get length() { return keep.size; },
+  };
+  try { Object.defineProperty(w, "localStorage", { value: shim, configurable: true, writable: true }); } catch (e) {}
+};
 
 let nextId = 1;
 const live = new Map<number, any>();
@@ -56,9 +87,11 @@ class NativeSpeechRecognition {
   removeEventListener(n: string, f: any) { if ((this as any)["on" + n] === f) (this as any)["on" + n] = null; }
 }
 
+// Android WebView ships neither constructor; Chromium (and the plain-web build) keep their own.
+if (w && (inHost || (!w.SpeechRecognition && !w.webkitSpeechRecognition))) { w.SpeechRecognition = NativeSpeechRecognition; w.webkitSpeechRecognition = NativeSpeechRecognition; }
+
 if (inHost) {
-  // Android WebView ships neither constructor; Chromium (and the plain-web build) keep their own.
-  if (!w.SpeechRecognition && !w.webkitSpeechRecognition) { w.SpeechRecognition = NativeSpeechRecognition; w.webkitSpeechRecognition = NativeSpeechRecognition; }
+  // (the speech polyfill is installed below, outside this block, so it never depends on how the host is detected)
 
   const md = navigator.mediaDevices as any;
   if (md?.getUserMedia && !md.__epiqueWrapped) {

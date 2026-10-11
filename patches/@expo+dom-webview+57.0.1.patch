@@ -1,5 +1,5 @@
 diff --git a/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt b/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt
-index 125ad1d..34b6063 100644
+index 125ad1d..924d14e 100644
 --- a/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt
 +++ b/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt
 @@ -4,15 +4,22 @@ package expo.modules.webview
@@ -25,12 +25,14 @@ index 125ad1d..34b6063 100644
  import android.webkit.WebView
  import android.webkit.WebViewClient
  import expo.modules.core.logging.LogHandlers
-@@ -198,14 +205,60 @@ internal class DomWebView(context: Context, appContext: AppContext) : ExpoView(c
+@@ -198,14 +205,62 @@ internal class DomWebView(context: Context, appContext: AppContext) : ExpoView(c
        // API 30+ default disables file access; DOM bundles need it for sibling assets.
        settings.allowFileAccess = true
        settings.allowFileAccessFromFileURLs = true
 +      // Epique: localStorage persistence, mic/camera for getUserMedia, window.open / target=_blank / tel: links.
 +      settings.domStorageEnabled = true
++      // Voice replies are played without a tap (live mode, assistant overlay), so audio must not wait for a user gesture.
++      settings.mediaPlaybackRequiresUserGesture = false
 +      settings.setSupportMultipleWindows(true)
        webViewClient = createWebViewClient()
 +      webChromeClient = createWebChromeClient()

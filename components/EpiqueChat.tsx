@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo, useCallback, memo, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { setActions, speechEvent, actions } from "./native-bridge";
+import { setActions, speechEvent, actions, installStorage } from "./native-bridge";
 import { useDOMImperativeHandle } from "expo/dom";
 import {
   Send, AudioLines, Plus, Copy, Check, RefreshCw, X, Mic, MicOff,
@@ -2412,16 +2412,6 @@ const NewChatIcon = ({ size = 19 }: any) => (
     <g transform="translate(9.4 7.6) scale(.62)" strokeWidth="2.9"><path d="M21.17 6.81a1 1 0 0 0-3.99-3.99L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z" /></g>
   </svg>
 );
-/** Minimal dropdown (used for fonts, ElevenLabs voices and models). options: [value, label, fontFamily?] */
-function Dd({ value, options, onChange, font }: any) {
-  const [o, setO] = useState<any>(false), cur = options.find((x) => x[0] === value) || options[0];
-  return (
-    <div className="dd">
-      <button className="ddb" onClick={() => setO(!o)} aria-expanded={o}><span style={font && cur ? { fontFamily: cur[2] } : undefined}>{cur ? cur[1] : "Select"}</span><ChevronDown size={15} {...ico} /></button>
-      {o && <><div className="ddscrim" onClick={() => setO(false)} /><div className="ddl" role="listbox">{options.map(([v, n, f]) => <button key={v} role="option" aria-selected={v === value} className={v === value ? "on" : ""} style={font ? { fontFamily: f } : undefined} onClick={() => { onChange(v); setO(false); }}><span>{n}</span>{v === value && <Check size={14} {...ico} />}</button>)}</div></>}
-    </div>
-  );
-}
 const Ring = () => <span className="ring"><i /></span>;
 
 /* ── Styles ─────────────────────────────────────────────── */
@@ -2712,7 +2702,7 @@ const CSS = `
 `;
 
 /* ── Speech: streamed text-to-speech and dictation ──────── */
-const SR = typeof window !== "undefined" ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition : null;
+const getSR = (): any => (typeof window !== "undefined" ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition : null) || null;
 const cleanSpeech = (t) => t.replace(/```[\s\S]*?(```|$)/g, " ").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/https?:\/\/\S+/g, "").replace(/\bui:\w+\s*\{.*\}/g, " ").replace(/\$[^$]*\$/g, " ").replace(/[*_`#>~|]/g, "").replace(/^\s*[-•]\s+/gm, "").replace(/\s+/g, " ").trim();
 // Speaks a queue of sentences one after another (long utterances get cut off on Android, so we keep them short).
 /* Text-to-speech: ElevenLabs first, optional Coqui server as backup. No browser voices; failures are reported to the UI. */
@@ -2734,7 +2724,7 @@ const elFail = async (r, m?) => {
 };
 const elAudio = async (t) => {
   const k = elKey(), m = elModel();
-  if (!k) throw new Error("ElevenLabs key missing. Add it in Settings > Voice.");
+  if (!k) throw new Error("ElevenLabs key missing. Add it in Settings > Keys.");
   let r;
   try { r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elVoice()}?output_format=mp3_44100_64`, { method: "POST", signal: AbortSignal.timeout?.(20000), headers: { "xi-api-key": k, "Content-Type": "application/json", Accept: "audio/mpeg" }, body: JSON.stringify({ text: t, model_id: m }) }); }
   catch (e) { throw new Error(e?.name === "TimeoutError" ? `ElevenLabs timed out (${m}).` : `Could not reach ElevenLabs: ${e?.message || e}`); }
@@ -2802,7 +2792,7 @@ function useDictation(getText, setText) {
   const [on, setOn] = useState<any>(false), r = useRef<any>({});
   const stop = useCallback(() => { r.current.on = false; try { r.current.rec?.abort(); } catch (e) {} setOn(false); }, []);
   const start = useCallback(() => {
-    if (!SR) return;
+    const SR = getSR(); if (!SR) return;
     const s = r.current; s.on = true; s.base = getText(); setOn(true);
     const go = () => {
       if (!s.on) return;
@@ -2818,7 +2808,7 @@ function useDictation(getText, setText) {
     go();
   }, []); // eslint-disable-line
   useEffect(() => () => stop(), [stop]);
-  return { on, toggle: () => (on ? stop() : start()), stop, ok: !!SR };
+  return { on, toggle: () => (on ? stop() : start()), stop, ok: !!getSR() };
 }
 
 /* ── Live voice: hands-free, live transcript, streamed replies ── */
@@ -2854,7 +2844,7 @@ function Live({ onTurn, onAbort, onClose, cfg, assistant }: any) {
     s.interrupt = () => { sp.stop(); onAbort(); };
 
     const listen = () => {
-      if (!SR || dead || s.fatal || s.muted || s.phase !== "listening") return;
+      const SR = getSR(); if (!SR || dead || s.fatal || s.muted || s.phase !== "listening") return;
       const rec = new SR(), t0 = Date.now(); let fin = "", it = "";
       rec.lang = navigator.language || "en-US"; rec.interimResults = true; rec.continuous = false;
       rec.onspeechstart = () => { s.act = 1; };
@@ -2879,7 +2869,7 @@ function Live({ onTurn, onAbort, onClose, cfg, assistant }: any) {
       s.rec = rec; try { rec.start(); } catch (e) {}
     };
     s.listen = listen;
-    if (!SR) setErr({ k: "svc", m: "Voice recognition isn't supported here." });
+    if (!getSR()) setErr({ k: "svc", m: "Voice recognition isn't supported here." });
     // Desktop only: a second mic stream drives the level meter. On phones it fights speech recognition, so we animate from speech events instead.
     if (!coarse && navigator.mediaDevices?.getUserMedia) {
       navigator.mediaDevices.getUserMedia({ audio: true }).then((st) => {
@@ -2929,7 +2919,7 @@ function Live({ onTurn, onAbort, onClose, cfg, assistant }: any) {
   const retry = () => { const s = S.current; s.fatal = false; setErr(null); s.muted = false; setMuted(false); s.listen?.(); };
   const toggleMute = () => {
     const s = S.current;
-    if (s.fatal && SR) return retry();
+    if (s.fatal && getSR()) return retry();
     s.muted = !s.muted; setMuted(s.muted);
     if (s.muted) { try { s.rec?.abort(); } catch (e) {} setCap(""); } else s.listen?.();
   };
@@ -2997,142 +2987,151 @@ function Home({ prof, recent, model, onTry, onOpen }: any) {
   );
 }
 
-/* ── Chats (lives inside Settings) ─────────────────────── */
-function ChatList({ chats, cid, onOpen, onNew, onRename, onDelete, onPin }: any) {
-  const [q, setQ] = useState<any>(""), [edit, setEdit] = useState<any>(null), [val, setVal] = useState<any>(""), [sure, setSure] = useState<any>(null);
-  const f = q.trim().toLowerCase(), list = chats.filter((c) => !f || c.title.toLowerCase().includes(f)).sort((a, b) => (b.pin ? 1 : 0) - (a.pin ? 1 : 0) || b.ts - a.ts);
+/* ── Shared modal pieces ────────────────────────────────── */
+const ensureFont = (f: any) => {
+  if (!f?.g || typeof document === "undefined") return;
+  const id = "epique-font-" + f.id; if (document.getElementById(id)) return;
+  const l = document.createElement("link"); l.id = id; l.rel = "stylesheet"; l.href = `https://fonts.googleapis.com/css2?family=${f.g}&display=swap`; document.head.appendChild(l);
+};
+const plain = (t: any) => String(t || "").replace(/```[\s\S]*?```/g, " ").replace(/\$\$?[^$]*\$\$?/g, " ").replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[#*_`>|~]/g, "").replace(/\s+/g, " ").trim();
+const preview = (c: any) => { const m = [...(c.msgs || [])].reverse().find((x: any) => x.role !== "user" && x.text) || (c.msgs || [])[c.msgs.length - 1]; return plain(m?.text).slice(0, 96); };
+
+/** A key field with an explicit Save button and a visible saved / not set state. */
+function KeyField({ label, hint, has, builtIn, onSave, onClear, onSaved }: any) {
+  const [v, setV] = useState<any>(""), [ok, setOk] = useState<any>(false), [saved, setSaved] = useState<any>(!!has);
+  const t = v.trim();
+  const commit = () => { if (!t) return; onSave(t); setV(""); setSaved(true); setOk(true); setTimeout(() => setOk(false), 1800); onSaved?.(t); };
   return (
-    <>
-      <button className="newc" onClick={onNew}><MessageSquarePlus size={17} {...ico} />New chat</button>
-      <div className="dsr"><Search size={15} {...ico} /><input value={q} placeholder="Search chats" onChange={(e) => setQ(e.target.value)} /></div>
-      <div className="clist">
-        {!list.length && <div className="dempty">{f ? "No chats match that search." : "Your conversations will show up here."}</div>}
-        {list.map((c) => (
-          <div key={c.id} className={"drow" + (c.id === cid ? " cur" : "")}>
-            {edit === c.id
-              ? <input className="dedit" autoFocus value={val} onChange={(e) => setVal(e.target.value)} onBlur={() => { onRename(c.id, val); setEdit(null); }} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setEdit(null); }} />
-              : <button className="dmain" onClick={() => onOpen(c.id)}>{c.pin && <Pin size={12} {...ico} />}<span>{c.title}</span><time>{ago(c.ts)}</time></button>}
-            <button className="ib sm" aria-label="Pin" onClick={() => onPin(c.id)}><Pin size={14} {...ico} /></button>
-            <button className="ib sm" aria-label="Rename" onClick={() => { setEdit(c.id); setVal(c.title); }}><Pencil size={14} {...ico} /></button>
-            <button className="ib sm" aria-label="Delete" onClick={() => (sure === c.id ? onDelete(c.id) : setSure(c.id))}>{sure === c.id ? <Check size={14} {...ico} /> : <Trash2 size={14} {...ico} />}</button>
-          </div>
-        ))}
+    <div className="kf">
+      <div className="kfh"><span>{label}</span><em className={ok || saved || builtIn ? "ok" : ""}>{ok ? "Saved" : saved ? "Saved on this device" : builtIn ? "Built in" : "Not set"}</em></div>
+      <div className="kfr">
+        <input type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} value={v} placeholder={saved || builtIn ? "Paste a new key to replace" : "Paste your key"}
+          onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
+        <button className={"kbtn" + (t ? " go" : "")} disabled={!t} onClick={commit}>{ok ? <Check size={16} {...ico} /> : "Save"}</button>
       </div>
-    </>
+      {hint && <p className="mhint">{hint}</p>}
+      {saved && <button className="klink" onClick={() => { onClear(); setSaved(false); }}>Remove key</button>}
+    </div>
   );
 }
 
-/* ── Settings / account ─────────────────────────────────── */
-function Settings({ chats, cid, onOpenChat, onNewChat, onRenameChat, onDeleteChat, onPinChat, onLive, prof, profiles, cfg, setCfg, onClose, onProfile, onSwitch, onAdd, onDelete, onExport, onImport, onClearChats }: any) {
-  const [gk, setGk] = useState<any>(""), [mk, setMk] = useState<any>(""), [pin, setPin] = useState<any>(""), [sv, setSv] = useState<any>(""), [verr, setVerr] = useState<any>(""), [fm, setFm] = useState<any>(elModel()), [vl, setVl] = useState<any>([]), [wl, setWl] = useState<any>(() => LS.get(WKEY, [])), [vv, setVv] = useState<any>(elVoice()), [vq, setVq] = useState<any>("");
-  const [nm, setNm] = useState<any>({ name: "", url: "", token: "" }), [test, setTest] = useState<any>({}), [sure, setSure] = useState<any>("");
-  const file = useRef<any>(undefined);
-  useEffect(() => { const prev = ttsSink; ttsSink = (m) => { setVerr(m); flash(m); }; return () => { ttsSink = prev; }; }, []);
+/* ── Settings (minimal modal) ───────────────────────────── */
+const Seg = ({ value, opts, on }: any) => <div className="mseg">{opts.map(([k, n]) => <button key={k} className={value === k ? "on" : ""} onClick={() => on(k)}>{n}</button>)}</div>;
+function SettingsModal({ prof, cfg, setCfg, onProfile, onClose, onClearChats }: any) {
+  const [vl, setVl] = useState<any>([]), [vv, setVv] = useState<any>(elVoice()), [vopen, setVopen] = useState<any>(false), [vq, setVq] = useState<any>(""), [msg, setMsg] = useState<any>(""), [sure, setSure] = useState<any>(false), [busy, setBusy] = useState<any>(false);
+  useEffect(() => { const prev = ttsSink; ttsSink = (m) => setMsg(m); return () => { ttsSink = prev; }; }, []);
   useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
-  const flash = (m) => { setSv(m); setTimeout(() => setSv(""), 1600); };
-  const addMcp = () => {
-    const url = nm.url.trim(); if (!/^https?:\/\//i.test(url)) return flash("Enter a full https:// URL");
-    setCfg({ mcp: [...cfg.mcp, { id: rid(), name: nm.name.trim() || new URL(url).hostname, url, token: nm.token.trim(), on: true }] }); setNm({ name: "", url: "", token: "" });
-  };
-  const runTest = async (s) => {
-    setTest((t) => ({ ...t, [s.id]: "…" }));
-    try { mcpCache.delete(s.url); mcpState.delete(s.url); const t = await mcpTools(s); mcpCache.set(s.url, t); setTest((x) => ({ ...x, [s.id]: `${t.length} tool${t.length === 1 ? "" : "s"} found` })); }
-    catch (e) { setTest((x) => ({ ...x, [s.id]: /fetch|Failed|NetworkError/i.test(e.message) ? "Blocked. The server must allow CORS for this site." : e.message })); }
-  };
-  const Sw = ({ on, set, label, sub }: any) => <button key={label} className="swr" role="switch" aria-checked={on} onClick={() => set(!on)}><div><b>{label}</b>{sub && <span>{sub}</span>}</div><i className={"sw" + (on ? " on" : "")}><u /></i></button>;
-  const pinSet = !!prof.pin;
-  const loadVoices = async (q: any = "") => {
-    const k = elKey(); if (!k) return flash("Paste your ElevenLabs key first");
+  const loadVoices = async () => {
+    const k = elKey(); if (!k) return setMsg("Add your ElevenLabs key first.");
+    setBusy(true);
     try {
-      const qs = `page_size=100&sort=name&sort_direction=asc${String(q || "").trim() ? "&search=" + encodeURIComponent(String(q).trim()) : ""}`;
-      let r = await fetch(`https://api.elevenlabs.io/v2/voices?${qs}`, { headers: { "xi-api-key": k } });
+      let r = await fetch("https://api.elevenlabs.io/v2/voices?page_size=100&sort=name&sort_direction=asc", { headers: { "xi-api-key": k } });
       if (r.status === 404) r = await fetch("https://api.elevenlabs.io/v1/voices", { headers: { "xi-api-key": k } });
       if (!r.ok) throw await elFail(r, "voices");
-      const j = await r.json(), l = (j.voices || []).map((v) => ({ id: v.voice_id, name: v.name + (v.labels?.accent ? " · " + v.labels.accent : "") }));
-      setVl(l); setVerr(""); flash(l.length ? `${l.length} voices` : "No voices found");
-    } catch (e) { setVerr(e.message); flash(e.message); }
+      const j = await r.json();
+      setVl((j.voices || []).map((v) => ({ id: v.voice_id, name: v.name + (v.labels?.accent ? " · " + v.labels.accent : "") }))); setMsg("");
+    } catch (e) { setMsg(e.message); }
+    setBusy(false);
   };
   useEffect(() => { if (elKey()) loadVoices(); }, []); // eslint-disable-line
+  const pickFont = (f) => { ensureFont(f); setCfg({ font: f.id }); };
+  const cur = vl.find((v) => v.id === vv)?.name || (vv === DEF_VOICE ? "George" : "Custom voice");
+  const f = vq.trim().toLowerCase(), vlist = vl.filter((v) => !f || v.name.toLowerCase().includes(f));
   return (
     <>
-      <div className="sheet-bg" onClick={onClose} />
-      <div className="glass sheet big" role="dialog" aria-label="Settings">
-        <div className="shd"><h3><Settings2 size={18} {...ico} />Settings</h3><button className="ib sm ghost" aria-label="Close" onClick={onClose}><X size={16} {...ico} /></button></div>
-        <div className="sbody">
-          <div className="sg">Appearance</div>
-          <div className="srow"><span>Theme</span><div className="seg">{[["dark", "Dark"], ["light", "Light"]].map(([k, n]) => <button key={k} className={cfg.theme === k ? "on" : ""} onClick={() => setCfg({ theme: k })}>{n}</button>)}</div></div>
-          <div className="srow"><span>Font</span><Dd font value={cfg.font || "inter"} options={FONTS.map((f) => [f.id, f.n, f.css])} onChange={(v) => setCfg({ font: v })} /></div>
-          <div className="srow"><span>Text size</span><div className="seg">{[["s", "S"], ["m", "M"], ["l", "L"]].map(([k, n]) => <button key={k} className={cfg.fs === k ? "on" : ""} onClick={() => setCfg({ fs: k })}>{n}</button>)}</div></div>
-          <div className="srow"><span>Logo colour</span><div className="cols">{["", "#7dd3fc", "#c4b5fd", "#f9a8d4", "#86efac", "#fcd34d"].map((c) => <button key={c} aria-label={c} className={c === (cfg.accent || "") ? "on" : ""} style={{ background: c || "linear-gradient(135deg,#fff 50%,#111 50%)" }} onClick={() => setCfg({ accent: c })} />)}</div></div>
-          {Sw({ on: cfg.calm, set: (v) => setCfg({ calm: v }), label: "Reduce motion" })}
+      <div className="mscrim" onClick={onClose} />
+      <div className="modal" role="dialog" aria-label="Settings">
+        <div className="mh"><h3>Settings</h3><button className="ib sm ghost" aria-label="Close" onClick={onClose}><X size={16} {...ico} /></button></div>
+        <div className="mb">
+          <div className="ms">Appearance</div>
+          <div className="mr"><span>Theme</span><Seg value={cfg.theme} opts={[["dark", "Dark"], ["light", "Light"]]} on={(k) => setCfg({ theme: k })} /></div>
+          <div className="mr"><span>Text size</span><Seg value={cfg.fs || "m"} opts={[["s", "S"], ["m", "M"], ["l", "L"]]} on={(k) => setCfg({ fs: k })} /></div>
+          <div className="mr col"><span>Font</span><div className="fgrid">{FONTS.map((x) => <button key={x.id} className={"fchip" + ((cfg.font || "inter") === x.id ? " on" : "")} style={{ fontFamily: x.css }} onClick={() => pickFont(x)}>{x.n}</button>)}</div></div>
 
-          <div className="sg">Voice</div>
-          <label className="fld">ElevenLabs key<div className="inl"><input type="password" autoComplete="off" defaultValue={elKey()} placeholder="Paste your key" onChange={(e) => saveLS("epique.el", cleanKey(e.target.value))} /><button className="tg" onClick={() => loadVoices(vq)}>Check</button></div></label>
-          <div className="srow"><span>Voice</span><Dd value={vv} options={(vl.some((v) => v.id === vv) ? vl : [{ id: vv, name: vv === DEF_VOICE ? "George (default)" : "Current voice" }, ...vl]).map((v) => [v.id, v.name])} onChange={(v) => { setVv(v); saveLS("epique.elv", v); }} /></div>
-          <div className="inl"><input className="vq" value={vq} placeholder="Search voices" autoCapitalize="none" onChange={(e) => setVq(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") loadVoices(vq); }} /><button className="tg" onClick={() => loadVoices(vq)}><Search size={14} {...ico} />Find</button></div>
-          <div className="srow"><span>Model</span><Dd value={fm} options={EL_MODELS} onChange={(v) => { setFm(v); saveLS("epique.elm", v); setVerr(""); }} /></div>
-          <label className="fld">Speed {cfg.rate.toFixed(1)}×<input className="rng" type="range" min="0.7" max="1.5" step="0.1" value={cfg.rate} onChange={(e) => setCfg({ rate: +e.target.value })} /></label>
-          <div className="inl"><button className="tg" onClick={() => { setVerr(""); tts.play("Good evening. All systems are online and ready.", cfg.rate); }}><Volume2 size={14} {...ico} />Play a sample</button></div>
-          {verr && <p className="hint" role="alert" style={{ color: "#ff8a8a" }}>{verr}</p>}
+          <div className="ms">Keys</div>
+          <KeyField label="Gemini" has={!!lsGet(KEY_STORE) || !!mem.key} builtIn={!!ENV_KEY} onSave={(t) => saveKey(t)} onClear={() => saveKey("")} />
+          <KeyField label="ElevenLabs (voice)" has={!!lsGet("epique.el")} builtIn={!!ENV_EL} onSave={(t) => { saveLS("epique.el", cleanKey(t)); setMsg(""); }} onClear={() => { saveLS("epique.el", ""); setVl([]); }} onSaved={() => setTimeout(loadVoices, 50)} />
 
-          <div className="sg">You</div>
-
-            <div className="plist">{profiles.map((p) => <button key={p.id} className={"pchip" + (p.id === prof.id ? " on" : "")} onClick={() => p.id !== prof.id && onSwitch(p.id)}><span className="av2" style={{ background: p.color }}>{(p.name || "Guest")[0].toUpperCase()}</span>{p.name || "Guest"}</button>)}<button className="pchip" onClick={onAdd}><Plus size={14} {...ico} />Add</button></div>
-            <label className="fld">Name<input value={prof.name} placeholder="What should I call you?" onChange={(e) => onProfile({ name: e.target.value })} /></label>
-            <label className="fld">App lock (PIN)<div className="inl"><input type="password" inputMode="numeric" value={pin} placeholder={pinSet ? "PIN is on. Enter a new one" : "Choose a PIN"} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 8))} /><button className="tg on" onClick={async () => { if (pin.length < 4) return flash("Use at least 4 digits"); onProfile({ pin: await sha(pin) }); setPin(""); flash("PIN saved"); }}>Set</button>{pinSet && <button className="tg" onClick={() => { onProfile({ pin: "" }); flash("PIN removed"); }}>Remove</button>}</div></label>
-            {profiles.length > 1 && <button className="tg" onClick={() => (sure === "p" ? (setSure(""), onDelete(prof.id)) : setSure("p"))}><Trash2 size={14} {...ico} />{sure === "p" ? "Tap again to delete this profile and its chats" : "Delete this profile"}</button>}
-          
-          <details><summary>About you and memory</summary>
-            <label className="fld">About you and how I should answer<textarea rows={3} value={prof.about} placeholder="e.g. Form 4 student in Harare. Explain simply, show working." onChange={(e) => onProfile({ about: e.target.value.slice(0, 600) })} /></label>
-            <div className="fld">Memories<div className="mems">{prof.mem.length ? prof.mem.map((m, i) => <div key={i} className="mem"><span>{m}</span><button className="ib sm" aria-label="Forget" onClick={() => onProfile({ mem: prof.mem.filter((_, j) => j !== i) })}><X size={14} {...ico} /></button></div>) : <p className="hint">Nothing yet. Say "remember that…" and I'll keep it.</p>}</div></div>
-          </details>
-
-          <div className="sg">More</div>
-          <details className="adv"><summary>Advanced</summary>
-            <details><summary>API keys</summary>
-            <label className="fld">Gemini API key<div className="inl"><input type="password" autoComplete="off" value={gk} placeholder={getKey() ? "Saved. Paste to replace" : "Paste your key"} onChange={(e) => setGk(e.target.value)} /><button className="tg on" onClick={() => { if (gk.trim()) { saveKey(gk.trim()); setGk(""); flash("Gemini key saved"); } }}>Save</button></div></label>
-            <label className="fld">Google Maps key<div className="inl"><input type="password" autoComplete="off" value={mk} placeholder={getMapsKey() ? "Saved. Paste to replace" : "Paste your key"} onChange={(e) => setMk(e.target.value)} /><button className="tg on" onClick={() => { saveMapsKey(mk.trim()); setMk(""); flash(mk.trim() ? "Maps key saved" : "Maps key cleared"); }}>Save</button></div></label>
-            <p className="hint">Maps uses the Embed API. Without a key, maps fall back to OpenStreetMap.</p>
-          </details>
-            <details><summary>Connectors (MCP)</summary>
-            <p className="hint">Add a remote MCP server (Streamable HTTP) and its tools become available to the assistant. The server must allow CORS from this site.</p>
-            {cfg.mcp.map((s) => (
-              <div key={s.id} className="mcp">
-                <div className="mcpt"><div><b>{s.name}</b><span>{s.url}</span></div><i className={"sw" + (s.on ? " on" : "")} role="switch" aria-checked={s.on} tabIndex={0} onClick={() => setCfg({ mcp: cfg.mcp.map((x) => (x.id === s.id ? { ...x, on: !x.on } : x)) })}><u /></i></div>
-                <div className="inl"><button className="tg" onClick={() => runTest(s)}><Plug size={14} {...ico} />Test</button><button className="tg" onClick={() => { mcpCache.delete(s.url); setCfg({ mcp: cfg.mcp.filter((x) => x.id !== s.id) }); }}><Trash2 size={14} {...ico} />Remove</button>{test[s.id] && <span className="hint">{test[s.id]}</span>}</div>
+          <div className="ms">Voice</div>
+          <button className="mr pick" aria-expanded={vopen} onClick={() => setVopen(!vopen)}><span>Voice</span><b>{cur}</b><ChevronDown size={15} {...ico} style={{ transition: "transform .2s ease", transform: vopen ? "rotate(180deg)" : "none" }} /></button>
+          {vopen && (
+            <div className="vbox">
+              <input className="vs" value={vq} placeholder={vl.length ? "Search voices" : busy ? "Loading voices…" : "Voices load once your key is saved"} autoCapitalize="none" onChange={(e) => setVq(e.target.value)} />
+              <div className="vlist">
+                {!vl.length && <button className="vi on" onClick={() => { setVv(DEF_VOICE); saveLS("epique.elv", DEF_VOICE); setVopen(false); }}><span>George (default)</span><Check size={14} {...ico} /></button>}
+                {vlist.map((v) => <button key={v.id} className={"vi" + (v.id === vv ? " on" : "")} onClick={() => { setVv(v.id); saveLS("epique.elv", v.id); setVopen(false); }}><span>{v.name}</span>{v.id === vv && <Check size={14} {...ico} />}</button>)}
+                {!!vl.length && !vlist.length && <div className="mhint">No voices match.</div>}
               </div>
-            ))}
-            <div className="inl" style={{ flexWrap: "wrap", gap: 6 }}>{MCP_PRESETS.map(([n, u]) => <button key={u} className="tg" onClick={() => setNm({ name: n, url: u, token: "" })}>{n.split(" (")[0]}</button>)}</div>
-            <label className="fld">Name<input value={nm.name} placeholder="Optional" onChange={(e) => setNm({ ...nm, name: e.target.value })} /></label>
-            <label className="fld">Server URL<input value={nm.url} placeholder="https://example.com/mcp" autoCapitalize="none" onChange={(e) => setNm({ ...nm, url: e.target.value })} /></label>
-            <label className="fld">Bearer token<div className="inl"><input type="password" value={nm.token} placeholder="Optional" onChange={(e) => setNm({ ...nm, token: e.target.value })} /><button className="tg on" onClick={addMcp}>Add</button></div></label>
-          </details>
-            <details><summary>My widgets</summary>
-            {wl.length ? wl.map((w) => <div key={w.id} className="mem"><span>{w.name}</span><div className="inl"><button className="tg" onClick={() => { onClose(); setTimeout(() => askAI(`Show my "${w.name}" widget`), 250); }}>Open</button><button className="ib sm" aria-label="Delete" onClick={() => { const n = wl.filter((x) => x.id !== w.id); LS.set(WKEY, n); setWl(n); }}><X size={13} {...ico} /></button></div></div>) : <div className="dempty">Ask me to build a widget, then tap Save widget on it.</div>}
-          </details>
-            <details><summary>Your data</summary>
-            <div className="inl wrapi"><button className="tg" onClick={onExport}><Download size={14} {...ico} />Export backup</button><button className="tg" onClick={() => file.current?.click()}><Upload size={14} {...ico} />Import backup</button><button className="tg" onClick={() => (sure === "c" ? (setSure(""), onClearChats(), flash("History cleared")) : setSure("c"))}><Trash2 size={14} {...ico} />{sure === "c" ? "Tap again to clear" : "Clear history"}</button></div>
-            <input ref={file} type="file" accept="application/json,.json" hidden onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) f.text().then((t) => { try { onImport(JSON.parse(t)); flash("Backup imported"); } catch (er) { flash("That file isn't a valid backup"); } }); }} />
-          </details>
-          </details>
+            </div>
+          )}
+          <label className="mr col"><span>Speed <b>{cfg.rate.toFixed(1)}×</b></span><input className="mrange" type="range" min="0.7" max="1.5" step="0.1" value={cfg.rate} onChange={(e) => setCfg({ rate: +e.target.value })} /></label>
+          <button className="mbtn" onClick={() => { setMsg(""); tts.play("Good evening. All systems are online and ready.", cfg.rate); }}><Volume2 size={15} {...ico} />Play a sample</button>
+          {msg && <p className="merr" role="alert">{msg}</p>}
+
+          <div className="ms">You</div>
+          <label className="mf"><span>Name</span><input value={prof.name} placeholder="What should I call you?" onChange={(e) => onProfile({ name: e.target.value })} /></label>
+          <label className="mf"><span>About you</span><textarea rows={3} value={prof.about} placeholder="e.g. Form 4 student in Harare. Explain simply." onChange={(e) => onProfile({ about: e.target.value.slice(0, 600) })} /></label>
+          {prof.mem.length > 0 && <div className="mems2">{prof.mem.map((m, i) => <div key={i} className="mem2"><span>{m}</span><button aria-label="Forget" onClick={() => onProfile({ mem: prof.mem.filter((_, j) => j !== i) })}><X size={13} {...ico} /></button></div>)}</div>}
+
+          <div className="ms">Data</div>
+          <button className={"mbtn" + (sure ? " danger" : "")} onClick={() => { if (sure) { setSure(false); onClearChats(); onClose(); } else { setSure(true); setTimeout(() => setSure(false), 3000); } }}><Trash2 size={15} {...ico} />{sure ? "Tap again to delete all chats" : "Clear chat history"}</button>
         </div>
-        {sv && <div className="toast">{sv}</div>}
       </div>
     </>
   );
 }
 
-function Lock({ prof, onUnlock }: any) {
-  const [v, setV] = useState<any>(""), [bad, setBad] = useState<any>(false);
-  const submit = async (x) => { if (await sha(x) === prof.pin) onUnlock(); else { setBad(true); setV(""); setTimeout(() => setBad(false), 500); } };
+/* ── Chats + models (one panel, two tabs) ───────────────── */
+function Panel({ tab, setTab, chats, cid, model, onModel, onOpen, onNew, onRename, onDelete, onPin, onClose }: any) {
+  const [q, setQ] = useState<any>(""), [act, setAct] = useState<any>(null), [edit, setEdit] = useState<any>(null), [val, setVal] = useState<any>(""), [sure, setSure] = useState<any>(null);
+  useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
+  const f = q.trim().toLowerCase(), list = chats.filter((c) => !f || c.title.toLowerCase().includes(f) || preview(c).toLowerCase().includes(f)).sort((a, b) => (b.pin ? 1 : 0) - (a.pin ? 1 : 0) || b.ts - a.ts);
+  const groups: any[] = []; for (const c of list) { const g = c.pin ? "Pinned" : dayLabel(c.ts); let x = groups.find((y) => y[0] === g); if (!x) { x = [g, []]; groups.push(x); } x[1].push(c); }
   return (
-    <div className="lock">
-      <span className="av2 lg" style={{ background: prof.color }}>{(prof.name || "Guest")[0].toUpperCase()}</span>
-      <h2>Welcome back{prof.name ? `, ${prof.name}` : ""}</h2>
-      <div className={"pins" + (bad ? " bad" : "")}>{[0, 1, 2, 3].map((i) => <i key={i} className={v.length > i ? "on" : ""} />)}</div>
-      <input className="pinin" type="password" inputMode="numeric" autoFocus value={v} placeholder="Enter PIN" onChange={(e) => { const x = e.target.value.replace(/\D/g, "").slice(0, 8); setV(x); if (x.length >= 4) submit(x); }} />
-      <span className="hint">Enter your PIN to open this profile</span>
-    </div>
+    <>
+      <div className="mscrim" onClick={onClose} />
+      <div className="modal tall" role="dialog" aria-label="Chats and models">
+        <div className="mh">
+          <div className="mtabs">{[["chats", "Chats"], ["models", "Models"]].map(([k, n]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{n}</button>)}</div>
+          <button className="ib sm ghost" aria-label="Close" onClick={onClose}><X size={16} {...ico} /></button>
+        </div>
+        {tab === "models" ? (
+          <div className="mb">{MODELS.map((m) => <button key={m.id} className={"mod" + (m.id === model ? " on" : "")} onClick={() => onModel(m.id)}><div><b>{m.n}</b><span>{m.d}</span></div>{m.id === model && <Check size={17} {...ico} />}</button>)}</div>
+        ) : (
+          <>
+            <div className="ctop">
+              <div className="csr"><Search size={15} {...ico} /><input value={q} placeholder="Search chats" autoCapitalize="none" onChange={(e) => setQ(e.target.value)} /></div>
+              <button className="cnew" aria-label="New chat" onClick={onNew}><NewChatIcon size={18} /><span>New</span></button>
+            </div>
+            <div className="mb clist2">
+              {!list.length && <div className="cempty"><MessageCircle size={26} {...ico} /><b>{f ? "No matches" : "No chats yet"}</b><span>{f ? "Try a different word." : "Your conversations will appear here."}</span></div>}
+              {groups.map(([g, items]) => (
+                <div key={g} className="cg">
+                  <div className="cgl">{g}</div>
+                  {items.map((c) => (
+                    <div key={c.id} className={"cit" + (c.id === cid ? " cur" : "")}>
+                      <div className="cir">
+                        {edit === c.id
+                          ? <input className="cedit" autoFocus value={val} onChange={(e) => setVal(e.target.value)} onBlur={() => { onRename(c.id, val); setEdit(null); }} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") { setEdit(null); } }} />
+                          : <button className="cmain2" onClick={() => onOpen(c.id)}><span className="ct">{c.pin && <Pin size={11} {...ico} />}<i>{c.title}</i><time>{ago(c.ts)}</time></span>{preview(c) && <span className="cp">{preview(c)}</span>}</button>}
+                        <button className="ib sm" aria-label="More" onClick={() => { setAct(act === c.id ? null : c.id); setSure(null); }}><MoreHorizontal size={16} {...ico} /></button>
+                      </div>
+                      {act === c.id && (
+                        <div className="cacts">
+                          <button onClick={() => { onPin(c.id); setAct(null); }}><Pin size={13} {...ico} />{c.pin ? "Unpin" : "Pin"}</button>
+                          <button onClick={() => { setEdit(c.id); setVal(c.title); setAct(null); }}><Pencil size={13} {...ico} />Rename</button>
+                          <button className={sure === c.id ? "danger" : ""} onClick={() => (sure === c.id ? (onDelete(c.id), setAct(null)) : setSure(c.id))}><Trash2 size={13} {...ico} />{sure === c.id ? "Confirm" : "Delete"}</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -3615,6 +3614,142 @@ const CSS5 = `
 .aura.light .seg button.on,.aura.light .tg.on{box-shadow:none}
 .aura.light.asst .lvcard{background:#fff}
 `;
+const CSS6 = `
+/* ── v2: smooth + minimal ───────────────────────────────── */
+.aura{--ease:cubic-bezier(.22,1,.36,1);--mbg:#111113;--gbg:linear-gradient(160deg,#1d1d21,#131315)}
+.aura.light{--mbg:#ffffff;--gbg:#ffffff}
+/* Blur is the main reason WebViews stutter: drop it everywhere and use solid surfaces instead. */
+.aura *,.aura *::before,.aura *::after{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+.glass{background:var(--gbg)!important;box-shadow:inset 0 0 0 1px rgba(var(--fr),.1),0 8px 24px rgba(0,0,0,.4)!important}
+.glass::before{display:none!important}
+.aura.light .glass{box-shadow:inset 0 0 0 1px rgba(20,20,30,.08),0 6px 20px rgba(20,20,30,.08)!important}
+.aura :is(button,input,textarea,select){font-family:inherit!important}
+.aura button{-webkit-tap-highlight-color:transparent}
+.aura .scroll{overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+
+/* header: no pill, no background. Just icons that fade away when idle */
+.hd{position:absolute;top:0;left:0;right:0;z-index:30;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:calc(20px + var(--sat,0px)) 10px 4px;pointer-events:none}
+.hd>*{pointer-events:auto}
+.hd .hl{justify-self:start;display:flex}.hd .hr{justify-self:end;display:flex;gap:0}
+.hb{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;color:rgba(var(--fr),.88);background:transparent;transition:opacity .45s ease,transform .2s var(--ease),background .2s ease}
+.hb:active{transform:scale(.86);background:rgba(var(--fr),.1)}
+.htitle{display:flex;align-items:center;gap:8px;height:42px;padding:0 12px;border-radius:999px;font-size:15px;font-weight:600;color:var(--fg);background:transparent;transition:opacity .45s ease,transform .2s var(--ease),background .2s ease}
+.htitle:active{transform:scale(.96);background:rgba(var(--fr),.08)}
+.hd.dim .hb{opacity:0}
+.hd.dim .htitle{opacity:.55}
+.aura.asst .hd{display:none!important}
+
+/* modals (settings, chats, key) */
+@keyframes mfade{from{opacity:0}to{opacity:1}}
+@keyframes mpop{from{opacity:0;transform:translate3d(0,14px,0) scale(.97)}to{opacity:1;transform:none}}
+@keyframes mrise{from{opacity:0;transform:translate3d(0,8px,0)}to{opacity:1;transform:none}}
+.mscrim{position:absolute;inset:0;z-index:80;background:rgba(0,0,0,.55);animation:mfade .22s ease both}
+.aura.light .mscrim{background:rgba(20,20,30,.28)}
+.modal{position:absolute;inset:0;margin:auto;z-index:81;width:min(calc(100% - 28px),420px);height:fit-content;max-height:min(calc(100% - 40px),680px);display:flex;flex-direction:column;overflow:hidden;border-radius:28px;background:var(--mbg);color:var(--fg);box-shadow:inset 0 0 0 1px rgba(var(--fr),.09),0 24px 60px rgba(0,0,0,.5);animation:mpop .3s var(--ease) both}
+.modal.tall{height:min(calc(100% - 40px),640px)}
+.modal.sm{max-height:none}
+.aura.light .modal{box-shadow:inset 0 0 0 1px rgba(20,20,30,.08),0 24px 60px rgba(20,20,30,.18)}
+.mh{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 14px 8px 20px;flex:none}
+.mh h3{font-size:18px;font-weight:650;letter-spacing:-.02em}
+.mb{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:2px 20px 20px;display:flex;flex-direction:column}
+.mb>*{flex:none}
+.ms{margin:22px 0 8px;font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:rgba(var(--fr),.42)}
+.ms:first-child{margin-top:8px}
+.mr{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px;font-size:15px;font-weight:500;width:100%;text-align:left}
+.mr.col{flex-direction:column;align-items:stretch;gap:10px;padding:8px 0}
+.mr.col>span{display:flex;justify-content:space-between;color:rgba(var(--fr),.8)}
+.mr.col>span b{font-weight:600;color:var(--fg)}
+.mr.pick{padding:0;cursor:pointer}
+.mr.pick b{margin-left:auto;font-weight:500;color:rgba(var(--fr),.55);max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mseg{display:flex;padding:3px;border-radius:999px;background:rgba(var(--fr),.07)}
+.mseg button,.mtabs button{height:30px;padding:0 15px;border-radius:999px;font-size:13px;font-weight:600;color:rgba(var(--fr),.6);transition:background .22s var(--ease),color .22s ease}
+.mseg button.on,.mtabs button.on{background:var(--fg);color:var(--bg)}
+.mtabs{display:flex;gap:4px;padding:3px;border-radius:999px;background:rgba(var(--fr),.07)}
+.fgrid{display:flex;flex-wrap:wrap;gap:8px}
+.fchip{height:38px;padding:0 15px;border-radius:999px;font-size:14px;background:rgba(var(--fr),.06);box-shadow:inset 0 0 0 1px rgba(var(--fr),.08);color:var(--fg);transition:transform .15s var(--ease),background .2s ease}
+.fchip:active{transform:scale(.95)}
+.fchip.on{background:var(--fg);color:var(--bg);box-shadow:none}
+.modal input:not([type=range]):not([type=checkbox]),.modal textarea{display:block;width:100%;min-width:0;height:46px;padding:0 14px;border-radius:14px;background:rgba(var(--fr),.06);box-shadow:inset 0 0 0 1px rgba(var(--fr),.1);color:var(--fg);caret-color:var(--fg);font-size:15px;font-weight:500;line-height:1.4;transition:box-shadow .2s ease}
+.modal textarea{height:auto;min-height:76px;padding:12px 14px;resize:none;white-space:pre-wrap;overflow-wrap:anywhere}
+.modal input:not([type=range]):focus,.modal textarea:focus{box-shadow:inset 0 0 0 1.5px rgba(var(--fr),.5)}
+.modal input::placeholder,.modal textarea::placeholder{color:rgba(var(--fr),.36)}
+.mf{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.mf>span{font-size:13px;font-weight:500;color:rgba(var(--fr),.6)}
+.kf{margin-bottom:14px}
+.kfh{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px;font-size:14px;font-weight:600}
+.kfh em{font-style:normal;font-size:12px;font-weight:500;color:rgba(var(--fr),.4)}
+.kfh em.ok{color:#7ddc9a}
+.aura.light .kfh em.ok{color:#1f9d55}
+.kfr{display:flex;gap:8px}
+.kbtn{flex:none;min-width:66px;height:46px;padding:0 16px;display:grid;place-items:center;border-radius:14px;font-size:14px;font-weight:650;background:rgba(var(--fr),.07);color:rgba(var(--fr),.4);transition:background .2s ease,color .2s ease,transform .15s var(--ease)}
+.kbtn.go{background:var(--fg);color:var(--bg)}
+.kbtn:active{transform:scale(.95)}
+.klink{margin-top:8px;font-size:12.5px;font-weight:500;color:rgba(var(--fr),.5);text-decoration:underline;text-underline-offset:3px}
+.mhint{margin:8px 0 0;font-size:12.5px;line-height:1.45;color:rgba(var(--fr),.5)}
+.merr{margin:10px 0 0;font-size:13px;line-height:1.45;color:#ff8a8a}
+.aura.light .merr{color:#c62828}
+.mbtn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:46px;margin-top:10px;border-radius:14px;font-size:14.5px;font-weight:600;background:rgba(var(--fr),.07);color:var(--fg);transition:transform .15s var(--ease),background .2s ease,color .2s ease}
+.mbtn:active{transform:scale(.97)}
+.mbtn.go{background:var(--fg);color:var(--bg)}
+.mbtn:disabled{opacity:.4}
+.mbtn.danger{background:#ff5d5d;color:#fff}
+.vbox{margin:2px 0 8px;display:flex;flex-direction:column;gap:8px;animation:mrise .22s var(--ease) both}
+.vlist{max-height:210px;overflow-y:auto;overscroll-behavior:contain;border-radius:16px;background:rgba(var(--fr),.045);padding:4px}
+.vi{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;min-height:42px;padding:0 12px;border-radius:12px;font-size:14px;text-align:left;color:var(--fg)}
+.vi span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vi.on{background:rgba(var(--fr),.12);font-weight:600}
+.vi:active{background:rgba(var(--fr),.1)}
+.mrange{-webkit-appearance:none;appearance:none;width:100%;height:28px;background:transparent;cursor:pointer}
+.mrange::-webkit-slider-runnable-track{height:4px;border-radius:9px;background:rgba(var(--fr),.2)}
+.mrange::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;margin-top:-9px;border-radius:50%;background:var(--fg);box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.mems2{display:flex;flex-direction:column;gap:6px}
+.mem2{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 8px 9px 14px;border-radius:14px;background:rgba(var(--fr),.05);font-size:13.5px;line-height:1.4}
+.mem2 button{flex:none;width:28px;height:28px;display:grid;place-items:center;border-radius:50%;color:rgba(var(--fr),.55)}
+
+/* models */
+.mod{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:13px 16px;margin-bottom:8px;border-radius:18px;text-align:left;background:rgba(var(--fr),.045);color:var(--fg);transition:background .2s ease,transform .15s var(--ease)}
+.mod:active{transform:scale(.98)}
+.mod.on{background:rgba(var(--fr),.11);box-shadow:inset 0 0 0 1px rgba(var(--fr),.16)}
+.mod div{display:flex;flex-direction:column;gap:2px;min-width:0}
+.mod b{font-size:15px;font-weight:600}
+.mod span{font-size:12.5px;color:rgba(var(--fr),.52)}
+
+/* chats */
+.ctop{display:flex;gap:8px;padding:0 20px 12px;flex:none}
+.csr{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:42px;padding:0 14px;border-radius:999px;background:rgba(var(--fr),.06);color:rgba(var(--fr),.5)}
+.csr input{flex:1;min-width:0;width:auto!important;height:auto!important;padding:0!important;background:transparent!important;box-shadow:none!important;border-radius:0!important;font-size:14.5px!important}
+.cnew{flex:none;display:flex;align-items:center;gap:7px;height:42px;padding:0 16px 0 13px;border-radius:999px;font-size:14px;font-weight:650;background:var(--fg);color:var(--bg);transition:transform .15s var(--ease)}
+.cnew:active{transform:scale(.95)}
+.clist2{padding-top:0}
+.cg{margin-bottom:10px}
+.cgl{margin:8px 4px 8px;font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:rgba(var(--fr),.4)}
+.cit{margin-bottom:8px;border-radius:20px;background:rgba(var(--fr),.045);animation:mrise .28s var(--ease) both;transition:background .2s ease}
+.cit.cur{background:rgba(var(--fr),.1);box-shadow:inset 0 0 0 1px rgba(var(--fr),.15)}
+.cir{display:flex;align-items:center;padding-right:6px}
+.cmain2{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;padding:13px 6px 13px 16px;text-align:left;color:var(--fg)}
+.cmain2:active{opacity:.7}
+.ct{display:flex;align-items:center;gap:6px;font-size:14.5px;font-weight:600}
+.ct i{font-style:normal;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ct time{flex:none;font-size:11px;font-weight:500;color:rgba(var(--fr),.4)}
+.cp{font-size:12.5px;line-height:1.4;color:rgba(var(--fr),.5);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cedit{flex:1}
+.cacts{display:flex;gap:6px;padding:0 12px 12px;animation:mrise .2s var(--ease) both}
+.cacts button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:36px;border-radius:12px;font-size:13px;font-weight:600;background:rgba(var(--fr),.07);color:var(--fg)}
+.cacts button.danger{background:#ff5d5d;color:#fff}
+.cempty{display:flex;flex-direction:column;align-items:center;gap:6px;padding:48px 20px;text-align:center;color:rgba(var(--fr),.45)}
+.cempty b{font-size:15px;color:var(--fg);margin-top:6px}
+.cempty span{font-size:13px}
+
+/* assistant card without a key */
+.anokey{position:absolute;inset:0;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:24px;text-align:center}
+.anokey b{font-size:16px;font-weight:650}
+.anokey span{font-size:13px;line-height:1.45;color:rgba(var(--fr),.55);max-width:300px}
+.anokey .mbtn{width:auto;padding:0 22px}
+
+/* a little calmer motion on phones */
+@media(pointer:coarse){.ring i{animation:none!important}}
+`;
+
 const readAtt = (f) => new Promise((res, rej) => {
   if (f.type.startsWith("image/")) {
     const img = new Image(), url = URL.createObjectURL(f);
@@ -3697,16 +3832,22 @@ function App({ assistant = false, onExit }: any) {
   const [atts, setAtts] = useState<any>([]);
   const [busy, setBusy] = useState<any>(false);
   const [live, setLive] = useState<any>(false);
-  const [hv, setHv] = useState<any>(true), hvT = useRef<any>(undefined);
-  const poke = useCallback(() => { setHv(true); clearTimeout(hvT.current); hvT.current = setTimeout(() => setHv(false), 2800); }, []);
-  useEffect(() => { poke(); const el = scroll.current; el?.addEventListener("scroll", poke, { passive: true }); return () => { el?.removeEventListener("scroll", poke); clearTimeout(hvT.current); }; }, [poke]); // eslint-disable-line
+  // The header icons show on any touch / scroll / keypress and fade away on their own after a short idle.
+  const [hv, setHv] = useState<any>(true), hvT = useRef<any>(undefined), hvRef = useRef<any>(true), wasDim = useRef<any>(false);
+  const poke = useCallback(() => { hvRef.current = true; setHv(true); clearTimeout(hvT.current); hvT.current = setTimeout(() => { hvRef.current = false; setHv(false); }, 2800); }, []);
+  useEffect(() => {
+    poke(); const el = scroll.current, r = root.current;
+    const down = () => { wasDim.current = !hvRef.current; poke(); };
+    el?.addEventListener("scroll", poke, { passive: true }); r?.addEventListener("pointerdown", down, { capture: true, passive: true } as any); r?.addEventListener("keydown", poke);
+    return () => { el?.removeEventListener("scroll", poke); r?.removeEventListener("pointerdown", down, { capture: true } as any); r?.removeEventListener("keydown", poke); clearTimeout(hvT.current); };
+  }, [poke]); // eslint-disable-line
   const askRef = useRef<any>(undefined);
   const [open, setOpen] = useState<any>(false);
-  const [menu, setMenu] = useState<any>(false), [drawer, setDrawer] = useState<any>(false), [optOpen, setOptOpen] = useState<any>(false);
+  const [panel, setPanel] = useState<any>(false), [optOpen, setOptOpen] = useState<any>(false), [noKey, setNoKey] = useState<any>(false);
   const [settings, setSettings] = useState<any>(false);
-  const [locked, setLocked] = useState<any>(() => !!(profiles.find((p) => p.id === pid) || profiles[0]).pin);
+  
   const [copied, setCopied] = useState<any>(null);
-  const [speaking, setSpeaking] = useState<any>(null), [tab, setTab] = useState<any>("model");
+  const [speaking, setSpeaking] = useState<any>(null);
   useEffect(() => () => tts.stop(), []);
   const [keyOpen, setKeyOpen] = useState<any>(false);
   const [keyVal, setKeyVal] = useState<any>("");
@@ -3721,11 +3862,7 @@ function App({ assistant = false, onExit }: any) {
   const flash = (m) => { setToast(m); setTimeout(() => setToast(""), m.length > 40 ? 5000 : 2200); };
   useEffect(() => { const prev = ttsSink; ttsSink = (m) => { setSpeaking(null); flash(m); }; return () => { ttsSink = prev; }; }, []);
 
-  useEffect(() => {
-    const f = fontOf(cfg.font); if (!f.g) return;
-    const id = "epique-font-" + f.id; if (document.getElementById(id)) return;
-    const l = document.createElement("link"); l.id = id; l.rel = "stylesheet"; l.href = `https://fonts.googleapis.com/css2?family=${f.g}&display=swap`; document.head.appendChild(l);
-  }, [cfg.font]);
+  useEffect(() => { ensureFont(fontOf(cfg.font)); }, [cfg.font]);
 
   // Fonts live in the page head (a shadow root can't register @font-face), and the page itself must never scroll.
   useEffect(() => {
@@ -3874,7 +4011,7 @@ function App({ assistant = false, onExit }: any) {
   useEffect(() => { const f = (e) => askRef.current?.(e.detail); window.addEventListener("epique:ask", f); return () => window.removeEventListener("epique:ask", f); }, []);
   useReminders((r) => { flash("Reminder: " + r.text); beep(); try { if (typeof Notification !== "undefined" && Notification.permission === "granted") new Notification("Reminder", { body: r.text }); } catch (e) {} });
 
-  const startLive = () => { if (!getKey()) { setKeyOpen(true); return; } dict.stop(); setOpen(false); setLive(true); };
+  const startLive = () => { if (!getKey()) { if (assistant) setNoKey(true); else setKeyOpen(true); return; } dict.stop(); setOpen(false); setLive(true); };
   useEffect(() => { if (assistant) startLive(); }, []); // eslint-disable-line
 
   /* history */
@@ -3891,7 +4028,6 @@ function App({ assistant = false, onExit }: any) {
   const switchProfile = (id) => {
     ctl.current?.abort(); setBusy(false);
     setPid(id); LS.set("epique.active", id); setChats(LS.get(chatKey(id), [])); setMsgs([]); setCid(null); setSettings(false);
-    if (profiles.find((p) => p.id === id)?.pin) setLocked(true);
   };
   const addProfile = () => { const p = newProfile("New profile"); saveProfiles([...profiles, p]); switchProfile(p.id); };
   const delProfile = (id) => { const rest = profiles.filter((p) => p.id !== id); if (!rest.length) return; LS.set(chatKey(id), []); saveProfiles(rest); switchProfile(rest[0].id); };
@@ -3942,7 +4078,7 @@ function App({ assistant = false, onExit }: any) {
 
   return (
     <div className={"aura" + (cfg.theme === "light" ? " light" : "") + (cfg.calm ? " calm" : "") + (live ? " islive" : "") + (assistant ? " asst" : "") + " fs-" + (cfg.fs || "m")} style={{ ...(cfg.accent && cfg.accent !== "#ffffff" ? { "--lc": cfg.accent } : {}), "--ff": fontOf(cfg.font).css } as any} ref={root}>
-      <style>{CSS + CSS2 + CSS3 + CSS4 + CSS5}</style>
+      <style>{CSS + CSS2 + CSS3 + CSS4 + CSS5 + CSS6}</style>
 
 
       <div className="scroll" ref={scroll}>
@@ -3956,53 +4092,32 @@ function App({ assistant = false, onExit }: any) {
       <div className="fade-b" />
       {far && msgs.length > 0 && <button className="glass ib fab pop" aria-label="Scroll to latest" onClick={() => { stick.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: "smooth" }); }}><ArrowDown size={18} {...ico} /></button>}
 
-      <header className={"head" + (hv || menu ? "" : " dim")} onPointerMove={poke} onPointerDown={poke} onFocus={poke}>
-        <div className="pillbar glass">
-          <div className="pgrp"><button className="pbtn" aria-label="Chats" onClick={() => { setMenu(false); setDrawer(true); }}><PanelLeft size={18} {...ico} /></button></div>
-          <button className="model tt" onClick={() => setMenu(!menu)}>
-            <Mark size={14} />{model.n}
-            <ChevronDown size={15} {...ico} style={{ transition: "transform .18s ease", transform: menu ? "rotate(180deg)" : "none" }} />
-          </button>
-          <div className="pgrp r">
-            <button className="pbtn" aria-label="New chat" onClick={newChat}><NewChatIcon size={19} /></button>
-            <button className="pbtn" aria-label="Settings" onClick={() => { setMenu(false); setSettings(true); }}><Settings2 size={18} {...ico} /></button>
-          </div>
+      <header className={"hd" + (hv || panel ? "" : " dim")} onClickCapture={(e) => { if (wasDim.current) { wasDim.current = false; e.stopPropagation(); e.preventDefault(); } }}>
+        <div className="hl"><button className="hb" aria-label="Chats" onClick={() => { setPanel("chats"); }}><PanelLeft size={20} {...ico} /></button></div>
+        <button className="htitle" aria-label="Models" onClick={() => setPanel("models")}><Mark size={15} /><span>{model.n}</span><ChevronDown size={15} {...ico} /></button>
+        <div className="hr">
+          <button className="hb" aria-label="New chat" onClick={newChat}><NewChatIcon size={20} /></button>
+          <button className="hb" aria-label="Settings" onClick={() => { setPanel(false); setSettings(true); }}><Settings2 size={20} {...ico} /></button>
         </div>
       </header>
 
-      {menu && (
-        <>
-          <div className="scrim" onClick={() => setMenu(false)} />
-          <div className="tp">
-            {MODELS.map((m) => <button key={m.id} className="mi" onClick={() => { setCfg({ model: m.id }); setMenu(false); }}><div><b>{m.n}</b><span>{m.d}</span></div>{m.id === model.id && <Check size={17} {...ico} />}</button>)}
-          </div>
-        </>
-      )}
+      {panel && <Panel tab={panel} setTab={setPanel} chats={chats} cid={cid} model={model.id} onModel={(id) => { setCfg({ model: id }); setPanel(false); }}
+        onOpen={(id) => { openChat(id); setPanel(false); }} onNew={() => { newChat(); setPanel(false); }}
+        onRename={(id, t) => t.trim() && setChats((cs) => cs.map((c) => (c.id === id ? { ...c, title: t.trim().slice(0, 80), ai: true } : c)))}
+        onDelete={delChat} onPin={(id) => setChats((cs) => cs.map((c) => (c.id === id ? { ...c, pin: !c.pin } : c)))} onClose={() => setPanel(false)} />}
 
-      <div className={"dscrim" + (drawer ? " on" : "")} onClick={() => setDrawer(false)} />
-      <aside className={"drawer" + (drawer ? " open" : "")} aria-label="Chats" aria-hidden={!drawer}>
-        <div className="dtop"><div className="dbrand"><Mark size={20} />Chats</div><button className="pbtn" aria-label="New chat" onClick={() => { newChat(); setDrawer(false); }}><NewChatIcon size={19} /></button></div>
-        <ChatList chats={chats} cid={cid} onOpen={(id) => { openChat(id); setDrawer(false); }} onNew={() => { newChat(); setDrawer(false); }}
-          onRename={(id, t) => t.trim() && setChats((cs) => cs.map((c) => (c.id === id ? { ...c, title: t.trim().slice(0, 80), ai: true } : c)))}
-          onDelete={delChat} onPin={(id) => setChats((cs) => cs.map((c) => (c.id === id ? { ...c, pin: !c.pin } : c)))} />
-      </aside>
-
-      {settings && <Settings chats={chats} cid={cid} onOpenChat={(id) => { openChat(id); setSettings(false); }} onNewChat={() => { newChat(); setSettings(false); }}
-        onRenameChat={(id, t) => t.trim() && setChats((cs) => cs.map((c) => (c.id === id ? { ...c, title: t.trim().slice(0, 80), ai: true } : c)))}
-        onDeleteChat={delChat} onPinChat={(id) => setChats((cs) => cs.map((c) => (c.id === id ? { ...c, pin: !c.pin } : c)))} onLive={() => { setSettings(false); startLive(); }} prof={prof} profiles={profiles} cfg={cfg} setCfg={setCfg} onClose={() => setSettings(false)} onProfile={updateProfile}
-        onSwitch={switchProfile} onAdd={addProfile} onDelete={delProfile} onExport={exportAll} onImport={importAll} onClearChats={() => { setChats([]); newChat(); }} />}
+      {settings && <SettingsModal prof={prof} cfg={cfg} setCfg={setCfg} onProfile={updateProfile} onClose={() => setSettings(false)} onClearChats={() => { setChats([]); newChat(); }} />}
 
       {keyOpen && (
         <>
-          <div className="sheet-bg" onClick={() => { setKeyOpen(false); pend.current = null; }} />
-          <div className="glass sheet">
-            <h3><KeyRound size={18} {...ico} />Gemini API key</h3>
-            <p>Saved only in this browser. For a permanent setup, add VITE_GEMINI_API_KEY to your .env.local file and restart Vite.</p>
-            <input type="password" autoComplete="off" spellCheck={false} placeholder="Paste your key" value={keyVal} autoFocus
-              onChange={(e) => setKeyVal(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitKey(); }} />
-            <div className="sa">
-              <button className="tg" onClick={() => { setKeyOpen(false); pend.current = null; }}>Cancel</button>
-              <button className="tg on" onClick={submitKey}>Save</button>
+          <div className="mscrim" onClick={() => { setKeyOpen(false); pend.current = null; }} />
+          <div className="modal sm" role="dialog" aria-label="Gemini API key">
+            <div className="mh"><h3>Gemini API key</h3><button className="ib sm ghost" aria-label="Close" onClick={() => { setKeyOpen(false); pend.current = null; }}><X size={16} {...ico} /></button></div>
+            <div className="mb">
+              <p className="mhint">Paste your Gemini key to start chatting. It's saved on this device only.</p>
+              <input className="vs" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="Paste your key" value={keyVal} autoFocus
+                onChange={(e) => setKeyVal(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submitKey(); }} />
+              <button className={"mbtn go"} disabled={!keyVal.trim()} onClick={submitKey}>Save key</button>
             </div>
           </div>
         </>
@@ -4060,15 +4175,21 @@ function App({ assistant = false, onExit }: any) {
         <div className={"note" + (open ? " show" : "")}>{NAME} can make mistakes. Enter to send, Shift + Enter for a new line.</div>
       </div>
 
+      {assistant && noKey && !live && (
+        <div className="anokey">
+          <b>Add your Gemini key first</b>
+          <span>Open Epique AI once and paste it in Settings. Then this card works from anywhere.</span>
+          <button className="mbtn go" onClick={() => actions.openApp?.()}>Open Epique AI</button>
+        </div>
+      )}
       {live && <Live cfg={cfg} assistant={assistant} onTurn={(t, h) => turnRef.current(t, h)} onAbort={() => ctl.current?.abort()} onClose={() => (assistant ? onExit?.() : setLive(false))} />}
       {toast && <div className="toast tf">{toast}</div>}
-      {locked && <Lock prof={prof} onUnlock={() => setLocked(false)} />}
     </div>
   );
 }
 
-// Everything renders inside a Shadow DOM so host CSS can't leak in. The shell is a bottom sheet:
-// drag the bar (or tap it / the expand icon) to glide between snap heights up to full screen.
+// Everything renders inside a Shadow DOM so host CSS can't leak in. The app is a bottom sheet: drag the bar
+// (or tap it) to glide between snap heights up to full screen. The assistant gesture shows only a small voice card.
 const SNAPS = [0.42, 0.68, 1];
 type HostProps = {
   dom?: import("expo/dom").DOMProps;
@@ -4078,19 +4199,26 @@ type HostProps = {
   permissions?: (p: { audio?: boolean; video?: boolean }) => Promise<boolean>;
   close?: () => Promise<void>;
   openSettings?: () => Promise<void>;
-  /** true when shown by the Android assistant gesture: tapping the dimmed area above the sheet dismisses it. */
+  openApp?: () => Promise<void>;
+  /** Snapshot of everything saved last time (JSON) and the action that saves a key; together they make settings persist. */
+  store?: string;
+  persist?: (key: string, value: string | null) => Promise<void>;
+  /** true when shown by the Android assistant gesture. */
   assistant?: boolean;
 };
-export default function EpiqueChat({ ref: hostRef, speech, permissions, close, openSettings, assistant }: HostProps) {
-  setActions({ speech, permissions, close, openSettings });
+const SHEET_CSS = "@keyframes epSheetIn{from{transform:translate3d(0,16%,0);opacity:0}to{transform:none;opacity:1}}";
+export default function EpiqueChat({ ref: hostRef, speech, permissions, close, openSettings, openApp, persist, store, assistant }: HostProps) {
+  setActions({ speech, permissions, close, openSettings, openApp, persist });
+  installStorage(store); // must run before the first read of localStorage (App renders below)
   useDOMImperativeHandle(hostRef, () => ({ speechEvent: (id: any, type: any, json: any) => speechEvent(id, type, json) }), []);
-  const ref = useRef<any>(undefined), st = useRef<any>({}), [sr, setSr] = useState<any>(null), [h, setH] = useState<any>(0), [drag, setDrag] = useState<any>(false);
+  const ref = useRef<any>(undefined), st = useRef<any>({}), [sr, setSr] = useState<any>(null), [h, setH] = useState<any>(SNAPS[1]), [drag, setDrag] = useState<any>(false);
+  // The page is created once; sheet drags re-render only the wrapper, never the whole chat.
+  const appEl = useMemo(() => (assistant ? <App assistant onExit={() => { actions.close?.(); }} /> : <App />), [assistant]);
   useEffect(() => {
     const el = ref.current; setSr(el.shadowRoot || (el.attachShadow ? el.attachShadow({ mode: "open" }) : el));
-    const raf = requestAnimationFrame(() => requestAnimationFrame(() => setH(SNAPS[1])));
     const tog = () => setH((x) => (x > 0.95 ? SNAPS[1] : 1)), fi = (e) => { if (e.composedPath()[0]?.tagName === "TEXTAREA") setH(1); };
     el.addEventListener("epique-size", tog); el.addEventListener("focusin", fi);
-    return () => { cancelAnimationFrame(raf); el.removeEventListener("epique-size", tog); el.removeEventListener("focusin", fi); };
+    return () => { el.removeEventListener("epique-size", tog); el.removeEventListener("focusin", fi); };
   }, []);
   const vh = () => window.innerHeight || 800;
   const down = (e) => { e.currentTarget.setPointerCapture(e.pointerId); st.current = { on: 1, y: e.clientY, h, last: e.clientY, v: 0, moved: 0 }; setDrag(true); };
@@ -4101,22 +4229,18 @@ export default function EpiqueChat({ ref: hostRef, speech, permissions, close, o
     setH((x) => { const p = x - t.v * 0.01; return SNAPS.reduce((a, b) => (Math.abs(b - p) < Math.abs(a - p) ? b : a)); });
   };
   const full = h > 0.98;
-  // Assistant gesture: no full app. Just a small live-voice card floating over whatever screen the user was on.
   if (assistant) return (
-    <div style={{ all: "initial", position: "fixed", inset: 0, display: "block", zIndex: 2147483000 }}>
-      <div onClick={() => { close?.(); }} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.22)" }} />
-      <div style={{ position: "absolute", left: 12, right: 12, bottom: "calc(12px + env(safe-area-inset-bottom, 0px))", margin: "0 auto", maxWidth: 480, height: 300, borderRadius: 30, overflow: "hidden", boxShadow: "0 18px 60px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.08)" }}>
-        <div ref={ref} style={{ all: "initial", position: "absolute", inset: 0, display: "block" }}>{sr && createPortal(<App assistant onExit={() => { close?.(); }} />, sr)}</div>
-      </div>
+    <div style={{ all: "initial", position: "absolute", inset: 0, display: "block", background: "#0a0a0a" }}>
+      <div ref={ref} style={{ all: "initial", position: "absolute", inset: 0, display: "block" }}>{sr && createPortal(appEl, sr)}</div>
     </div>
   );
   return (
-    <div style={{ all: "initial", position: "fixed", inset: 0, display: "block", zIndex: 2147483000, pointerEvents: h ? "auto" : "none" }}>
-      <div onClick={assistant ? () => { close?.(); } : undefined} style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.55)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", opacity: h && !full ? 1 : 0, transition: "opacity .2s ease" }} />
-      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, margin: "0 auto", width: full ? "100%" : "min(100%, 680px)", height: `${h * 100}%`, borderRadius: `${full ? 0 : 28}px ${full ? 0 : 28}px 0 0`, overflow: "hidden", background: "#050505", willChange: "height", boxShadow: "0 -20px 80px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.08)", transition: drag ? "none" : "height .26s cubic-bezier(.2,.9,.3,1), border-radius .2s ease, width .2s cubic-bezier(.2,.9,.3,1)", "--sat": full ? "env(safe-area-inset-top,0px)" : "0px" } as any}>
-        <div ref={ref} style={{ all: "initial", position: "absolute", inset: 0, display: "block" }}>{sr && createPortal(<App />, sr)}</div>
+    <div style={{ all: "initial", position: "fixed", inset: 0, display: "block", zIndex: 2147483000 }}>
+      <style>{SHEET_CSS}</style>
+      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, margin: "0 auto", width: full ? "100%" : "min(100%, 680px)", height: `${h * 100}%`, borderRadius: `${full ? 0 : 28}px ${full ? 0 : 28}px 0 0`, overflow: "hidden", background: "#050505", boxShadow: "0 0 0 1px rgba(255,255,255,.08)", animation: "epSheetIn .4s cubic-bezier(.22,1,.36,1) both", transition: drag ? "none" : "height .3s cubic-bezier(.22,1,.36,1), border-radius .2s ease, width .2s ease", "--sat": full ? "env(safe-area-inset-top,0px)" : "0px" } as any}>
+        <div ref={ref} style={{ all: "initial", position: "absolute", inset: 0, display: "block" }}>{sr && createPortal(appEl, sr)}</div>
         <div onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} aria-label="Drag to resize" style={{ position: "absolute", top: 0, left: 0, right: 0, height: 22, zIndex: 5, display: "grid", placeItems: "center", touchAction: "none", cursor: "grab" }}>
-          <i style={{ width: drag ? 56 : 40, height: 5, borderRadius: 9, background: drag ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.28)", transition: "width .3s cubic-bezier(.34,1.56,.64,1), background .3s" }} />
+          <i style={{ width: drag ? 56 : 40, height: 5, borderRadius: 9, background: drag ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.28)", transition: "width .25s ease, background .25s" }} />
         </div>
       </div>
     </div>

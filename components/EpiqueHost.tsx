@@ -1,19 +1,56 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { BackHandler, Linking, PermissionsAndroid, Platform } from 'react-native';
+import Storage from 'expo-sqlite/kv-store';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import EpiqueChat from './EpiqueChat';
 
+type Mic = 'granted' | 'denied' | 'blocked';
+
+/** Asks Android for the microphone with the system dialog (the one reliable path). Never throws. */
+export async function ensureMic(): Promise<Mic> {
+  if (Platform.OS !== 'android') return 'granted';
+  try {
+    const P = PermissionsAndroid.PERMISSIONS.RECORD_AUDIO;
+    if (await PermissionsAndroid.check(P)) return 'granted';
+    const r = await PermissionsAndroid.request(P, {
+      title: 'Microphone',
+      message: 'Epique AI needs the microphone so it can hear you.',
+      buttonPositive: 'Allow',
+      buttonNegative: 'Not now',
+    });
+    if (r === PermissionsAndroid.RESULTS.GRANTED) return 'granted';
+    return r === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN ? 'blocked' : 'denied';
+  } catch (e) {
+    return 'denied';
+  }
+}
+
+/** Closes the assistant overlay (AssistantActivity turns the default back action into finish()). */
+export const closeAssistant = () => { try { BackHandler.exitApp(); } catch (e) {} };
+
 /**
- * Native half of the DOM component. It renders the unchanged EpiqueChat page and services the few things a
- * WebView cannot do by itself: speech recognition and the Android microphone / camera permission prompts.
+ * Native half of the DOM component. It renders the EpiqueChat page and services the few things a WebView cannot do
+ * by itself: persistent storage, speech recognition and the Android microphone / camera permission prompts.
  */
 export default function EpiqueHost({ assistant = false }: { assistant?: boolean }) {
   const dom = useRef<any>(null);
   const cur = useRef(0);
 
+  // Everything the page saved last time (keys, chats, settings). Read synchronously so the page never renders without it.
+  const store = useMemo(() => {
+    try {
+      const out: Record<string, string> = {};
+      for (const k of Storage.getAllKeysSync()) { const v = Storage.getItemSync(k); if (v != null) out[k] = v; }
+      return JSON.stringify(out);
+    } catch (e) { return '{}'; }
+  }, []);
+  const persist = useCallback(async (key: string, value: string | null) => {
+    try { if (value == null) Storage.removeItemSync(key); else Storage.setItemSync(key, value); } catch (e) {}
+  }, []);
+
   const emit = useCallback((type: string, payload?: unknown) => {
     if (!cur.current) return;
-    dom.current?.speechEvent(cur.current, type, payload === undefined ? '' : JSON.stringify(payload));
+    try { dom.current?.speechEvent(cur.current, type, payload === undefined ? '' : JSON.stringify(payload)); } catch (e) {}
   }, []);
 
   useSpeechRecognitionEvent('start', () => emit('start'));
@@ -24,31 +61,59 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
   useSpeechRecognitionEvent('error', (e) => emit('error', { error: e.error, message: e.message }));
   useSpeechRecognitionEvent('end', () => { emit('end'); });
 
+  // Ask for the microphone once, the first time the real app opens, so the system prompt appears up front.
+  useEffect(() => {
+    if (assistant) return;
+    const t = setTimeout(async () => {
+      try { if (Storage.getItemSync('native.micAsked')) return; Storage.setItemSync('native.micAsked', '1'); } catch (e) {}
+      await ensureMic();
+    }, 900);
+    return () => clearTimeout(t);
+  }, [assistant]);
+
   const speech = useCallback(async (c: { op: string; id: number; lang?: string; interim?: boolean; continuous?: boolean }) => {
     if (c.op === 'start') {
       cur.current = c.id;
-      let p = await ExpoSpeechRecognitionModule.getPermissionsAsync();
-      if (!p.granted) p = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      // message tells the UI whether Android will still show the prompt ("denied") or the user must use system settings ("blocked").
-      if (!p.granted) { emit('error', { error: 'not-allowed', message: p.canAskAgain === false ? 'blocked' : 'denied' }); emit('end'); return; }
-      if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) { emit('error', { error: 'service-not-allowed', message: 'unavailable' }); emit('end'); return; }
-      ExpoSpeechRecognitionModule.start({ lang: c.lang || 'en-US', interimResults: !!c.interim, continuous: !!c.continuous });
-    } else if (c.op === 'stop') ExpoSpeechRecognitionModule.stop();
-    else if (c.op === 'abort') ExpoSpeechRecognitionModule.abort();
+      const m = await ensureMic();
+      if (m !== 'granted') { emit('error', { error: 'not-allowed', message: m }); emit('end'); return; }
+      try {
+        if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) { emit('error', { error: 'service-not-allowed', message: 'unavailable' }); emit('end'); return; }
+        ExpoSpeechRecognitionModule.start({ lang: c.lang || 'en-US', interimResults: !!c.interim, continuous: !!c.continuous });
+      } catch (e: any) {
+        emit('error', { error: 'service-not-allowed', message: String(e?.message || e) }); emit('end');
+      }
+    } else if (c.op === 'stop') { try { ExpoSpeechRecognitionModule.stop(); } catch (e) {} }
+    else if (c.op === 'abort') { try { ExpoSpeechRecognitionModule.abort(); } catch (e) {} }
   }, [emit]);
 
   const permissions = useCallback(async ({ audio, video }: { audio?: boolean; video?: boolean }) => {
     if (Platform.OS !== 'android') return true;
-    const need: any[] = [];
-    if (audio) need.push(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
-    if (video) need.push(PermissionsAndroid.PERMISSIONS.CAMERA);
-    if (!need.length) return true;
-    const r = await PermissionsAndroid.requestMultiple(need);
-    return need.every((n) => r[n] === PermissionsAndroid.RESULTS.GRANTED);
+    if (audio && (await ensureMic()) !== 'granted') return false;
+    if (video) {
+      try {
+        const P = PermissionsAndroid.PERMISSIONS.CAMERA;
+        if (!(await PermissionsAndroid.check(P)) && (await PermissionsAndroid.request(P)) !== PermissionsAndroid.RESULTS.GRANTED) return false;
+      } catch (e) { return false; }
+    }
+    return true;
   }, []);
 
-  const close = useCallback(async () => { BackHandler.exitApp(); }, []);
+  const close = useCallback(async () => { closeAssistant(); }, []);
   const openSettings = useCallback(async () => { try { await Linking.openSettings(); } catch (e) {} }, []);
+  const openApp = useCallback(async () => { try { await Linking.openURL('epique://'); } catch (e) {} closeAssistant(); }, []);
 
-  return <EpiqueChat ref={dom} dom={{ style: { flex: 1, backgroundColor: 'transparent' }, containerStyle: { backgroundColor: 'transparent' } } as any} speech={speech} permissions={permissions} close={close} openSettings={openSettings} assistant={assistant} />;
+  return (
+    <EpiqueChat
+      ref={dom}
+      dom={{ style: { flex: 1, backgroundColor: 'transparent' }, containerStyle: { flex: 1, backgroundColor: 'transparent' } } as any}
+      store={store}
+      persist={persist}
+      speech={speech}
+      permissions={permissions}
+      close={close}
+      openSettings={openSettings}
+      openApp={openApp}
+      assistant={assistant}
+    />
+  );
 }
