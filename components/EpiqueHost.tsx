@@ -3,6 +3,7 @@ import { BackHandler, Linking, PermissionsAndroid, Platform } from 'react-native
 import Storage from 'expo-sqlite/kv-store';
 import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
+import * as DocumentPicker from 'expo-document-picker';
 import EpiqueChat from './EpiqueChat';
 
 type Mic = 'granted' | 'denied' | 'blocked';
@@ -115,6 +116,22 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
   // Never leave the phone talking after the screen goes away.
   useEffect(() => () => { try { Speech.stop(); } catch (e) {} }, []);
 
+  // Native file picker (a WebView <input type=file> does nothing here). Returns the chosen files as JSON with base64 bodies.
+  const pick = useCallback(async () => {
+    try {
+      const r = await DocumentPicker.getDocumentAsync({ type: '*/*', multiple: true, copyToCacheDirectory: true });
+      if (r.canceled) return '[]';
+      const out: { name: string; mime: string; b64: string }[] = [];
+      for (const a of r.assets.slice(0, 6)) {
+        if ((a.size || 0) > 8e6) continue;
+        const b = await (await fetch(a.uri)).blob();
+        const b64 = await new Promise<string>((res) => { const fr = new FileReader(); fr.onloadend = () => res(String(fr.result).split(',')[1] || ''); fr.readAsDataURL(b); });
+        out.push({ name: a.name, mime: a.mimeType || b.type, b64 });
+      }
+      return JSON.stringify(out);
+    } catch (e) { return '[]'; }
+  }, []);
+
   const close = useCallback(async () => { closeAssistant(); }, []);
   const openSettings = useCallback(async () => { try { await Linking.openSettings(); } catch (e) {} }, []);
   const openApp = useCallback(async () => { try { await Linking.openURL('epique://'); } catch (e) {} closeAssistant(); }, []);
@@ -129,6 +146,7 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
       permissions={permissions}
       tts={tts}
       close={close}
+      pick={pick}
       openSettings={openSettings}
       openApp={openApp}
       assistant={assistant}

@@ -7,6 +7,7 @@
  *  - getUserMedia       -> asks for the Android RECORD_AUDIO / CAMERA runtime permission first
  */
 type Actions = {
+  pick?: () => Promise<string>;
   speech?: (c: { op: string; id: number; lang?: string; interim?: boolean; continuous?: boolean }) => Promise<void>;
   permissions?: (p: { audio?: boolean; video?: boolean }) => Promise<boolean>;
   close?: () => Promise<void>;

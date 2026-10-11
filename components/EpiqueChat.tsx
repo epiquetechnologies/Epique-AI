@@ -346,6 +346,21 @@ const calc = (ex) => {
   return v;
 };
 
+const grabFrame = async (src: string) => {
+  let st: any;
+  if (src === "screen") {
+    if (!navigator.mediaDevices?.getDisplayMedia) throw new Error("Screen capture isn't available in this app on Android. Ask the user to attach a screenshot with the + button.");
+    st = await navigator.mediaDevices.getDisplayMedia({ video: true });
+  } else {
+    if (actions.permissions) { const ok = await actions.permissions({ video: true }).catch(() => false); if (!ok) throw new Error("Camera permission was denied."); }
+    st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+  }
+  try {
+    const v: any = document.createElement("video"); v.muted = true; v.playsInline = true; v.srcObject = st; await v.play(); await sleep(src === "screen" ? 250 : 800);
+    const w = v.videoWidth || 640, h = v.videoHeight || 480, k = Math.min(1, 1024 / Math.max(w, h)), c = document.createElement("canvas"); c.width = Math.round(w * k); c.height = Math.round(h * k);
+    c.getContext("2d")!.drawImage(v, 0, 0, c.width, c.height); return c.toDataURL("image/jpeg", 0.8).split(",")[1];
+  } finally { st.getTracks().forEach((t) => t.stop()); }
+};
 /* ── Agent tools (exposed to the model via function calling) ── */
 const S = (d) => ({ type: "STRING", description: d });
 const TOOLS = {
@@ -480,6 +495,10 @@ const TOOLS = {
   get_air_quality: {
     label: "Checking air quality", I: Wind, d: "Current air quality index (US AQI), PM2.5 and PM10 for a city.", p: { location: S("City, Country") },
     run: async ({ location }) => { const g = (await fetchGeo(String(location)))[0], j = await getJSON(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${g.lat}&longitude=${g.lon}&current=us_aqi,pm2_5,pm10`); return { place: g.name.split(",").slice(0, 2).join(","), us_aqi: j.current?.us_aqi, pm2_5: j.current?.pm2_5, pm10: j.current?.pm10 }; },
+  },
+  look: {
+    label: "Looking", I: Eye, d: "See through the user's camera or screen. Call it when the user asks you to look at, read, identify or check something physical or on their screen. source is 'camera' or 'screen'.", p: { source: S("camera or screen"), question: S("What to look for or answer about the view") },
+    run: async ({ source, question }, o) => { const b64 = await grabFrame(String(source || "camera").toLowerCase()); const r = await callRetry(o, { contents: [{ role: "user", parts: [{ inlineData: { mimeType: "image/jpeg", data: b64 } }, { text: String(question || "Describe what you see.") }] }] }, { attempts: 3 }); return { answer: r.text.slice(0, 1200) }; },
   },
   run_code: {
     label: "Running code", I: Code, d: "Write and run Python in a sandbox for exact calculations, data processing, statistics, simulations or checking logic. Describe the task in plain words.", p: { task: S("What to compute, with any data") },
@@ -2716,7 +2735,14 @@ const saveLS = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
 let ttsSink: any = null, lastTtsErr: any = [0, ""];
 const reportTts = (m) => { const n = Date.now(); if (lastTtsErr[1] === m && n - lastTtsErr[0] < 4000) return; lastTtsErr = [n, m]; ttsSink?.(m); };
 const brief = (t, n = 450) => { if (t.length <= n) return t; const c = t.slice(0, n), i = Math.max(c.lastIndexOf(". "), c.lastIndexOf("! "), c.lastIndexOf("? ")); return i > 120 ? c.slice(0, i + 1) : c; };
-const blobAudio = async (r) => { const u = URL.createObjectURL(await r.blob()), a = new Audio(u); a.addEventListener("ended", () => URL.revokeObjectURL(u)); return a; };
+const sharedAudio: any = typeof Audio !== "undefined" ? new Audio() : null;
+const blobAudio = async (r) => {
+  const u = URL.createObjectURL(await r.blob());
+  const c: any = { playbackRate: 1, onended: null, onerror: null,
+    play() { const a = sharedAudio; a.onended = () => { try { URL.revokeObjectURL(u); } catch (e) {} c.onended?.(); }; a.onerror = () => c.onerror?.(); a.src = u; a.playbackRate = c.playbackRate || 1; return a.play(); },
+    pause() { try { if (sharedAudio.src === u) sharedAudio.pause(); } catch (e) {} } };
+  return c;
+};
 const elFail = async (r, m?) => {
   let st = "", msg = ""; try { const j = await r.json(), d = j?.detail; st = d?.status || ""; msg = d?.message || (typeof d === "string" ? d : ""); } catch (e) {}
   const hint = st === "quota_exceeded" ? "You've used all your ElevenLabs credits." : st === "detected_unusual_activity" ? "ElevenLabs paused the free plan for this connection (VPN or proxy). Turn it off or upgrade." : st === "missing_permissions" || /permission/i.test(msg) ? "This key lacks access. Turn on Text to Speech and Voices (read) for the key." : r.status === 401 ? "ElevenLabs didn't accept this key. Copy it again from elevenlabs.io (Developers > API Keys)." : r.status === 429 ? "Too many requests. Wait a moment." : "";
@@ -2724,7 +2750,7 @@ const elFail = async (r, m?) => {
 };
 const elAudio = async (t) => {
   const k = elKey(), m = elModel();
-  if (!k) throw new Error("ElevenLabs key missing. Add it in Settings, or clear the Coqui address to use your phone\u2019s voice.");
+  if (!k) throw new Error("ElevenLabs key missing. Add it in Settings > Keys.");
   let r;
   try { r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elVoice()}?output_format=mp3_44100_64`, { method: "POST", signal: AbortSignal.timeout?.(20000), headers: { "xi-api-key": k, "Content-Type": "application/json", Accept: "audio/mpeg" }, body: JSON.stringify({ text: t, model_id: m }) }); }
   catch (e) { throw new Error(e?.name === "TimeoutError" ? `ElevenLabs timed out (${m}).` : `Could not reach ElevenLabs: ${e?.message || e}`); }
@@ -2737,7 +2763,7 @@ const coquiAudio = async (t) => {
   return blobAudio(r);
 };
 /* The phone's own voice: used whenever no cloud voice (ElevenLabs / Coqui) is configured, so replies are always spoken and no key is ever required. */
-const cloudVoice = () => !!(elKey() || coquiUrl());
+const cloudVoice = () => true; // ElevenLabs only
 const deviceSpeak = (text: string, rate?: number): Promise<void> => {
   if (actions.tts) return actions.tts({ op: "speak", text, rate: rate || 1, lang: navigator.language || "en-US" }).catch(() => {});
   return new Promise<void>((res) => { try { const u = new SpeechSynthesisUtterance(text); u.rate = rate || 1; u.onend = () => res(); u.onerror = () => res(); speechSynthesis.speak(u); } catch (e) { res(); } });
@@ -2745,20 +2771,17 @@ const deviceSpeak = (text: string, rate?: number): Promise<void> => {
 const deviceStop = () => { try { if (actions.tts) { actions.tts({ op: "stop" }).catch(() => {}); } else if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); } catch (e) {} };
 let audioUnlocked = false;
 const unlockAudio = () => {
-  if (audioUnlocked) return; audioUnlocked = true;
-  try { const C = (window as any).AudioContext || (window as any).webkitAudioContext; if (C) { const c = new C(); c.resume?.(); const b = c.createBufferSource(); b.buffer = c.createBuffer(1, 1, 22050); b.connect(c.destination); b.start(0); setTimeout(() => c.close?.(), 400); } } catch (e) {}
-  try { const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAABErAAABAAgAZGF0YQAAAAA="); a.volume = 0; a.play().catch(() => { audioUnlocked = false; }); } catch (e) {}
+  if (audioUnlocked || !sharedAudio) return; audioUnlocked = true;
+  try { sharedAudio.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAABErAAABAAgAZGF0YQAAAAA="; sharedAudio.volume = 1; sharedAudio.play().catch(() => { audioUnlocked = false; }); } catch (e) {}
+  try { const C = (window as any).AudioContext || (window as any).webkitAudioContext; if (C) { const c = new C(); c.resume?.(); setTimeout(() => c.close?.(), 400); } } catch (e) {}
 };
-if (typeof window !== "undefined") ["pointerdown", "touchstart", "keydown", "click"].forEach((ev) => window.addEventListener(ev, unlockAudio, { passive: true, capture: true } as any));
-// If the browser still refuses autoplay (assistant opened by gesture, no tap yet) fall back to the phone's own voice instead of erroring.
-const safePlay = (au: any, text: string, rate?: number) => au.play().catch((e) => {
-  if (e?.name === "NotAllowedError") { audioUnlocked = false; return deviceSpeak(text, rate).then(() => { try { au.onended?.(new Event("ended")); } catch (x) {} }); }
-  throw e;
-});
-const getAudio = async (t) => {
-  try { return await elAudio(t); }
-  catch (e) { if (!coquiUrl()) throw e; try { return await coquiAudio(t); } catch (e2) { throw new Error(`${e.message} Coqui backup also failed: ${e2.message}`); } }
-};
+if (typeof window !== "undefined") {
+  ["pointerdown", "touchstart", "keydown", "click"].forEach((ev) => window.addEventListener(ev, unlockAudio, { passive: true, capture: true } as any));
+  try { (window as any).CSS?.registerProperty?.({ name: "--ang", syntax: "<angle>", inherits: false, initialValue: "0deg" }); } catch (e) {}
+}
+const safePlay = (au: any, text?: string, rate?: number) => au.play().catch((e) => { audioUnlocked = false; throw e?.name === "NotAllowedError" ? new Error("Tap the screen once to enable ElevenLabs audio.") : e; });
+const getAudio = (t) => elAudio(t);
+
 const tts = (() => {
   let a = null, id = 0, end = null;
   const parts = (t) => { const o = []; let c = ""; for (const x of t.match(/[^.!?\n]+[.!?]*\s*/g) || [t]) { if ((c + x).length > 260 && c) { o.push(c); c = ""; } c += x; } if (c.trim()) o.push(c); return o; };
@@ -3649,20 +3672,19 @@ const CSS5 = `
 
 const CSS7 = `
 /* ── v4: glass + glow restored, live reborn ─────────────── */
-@property --ang{syntax:'<angle>';inherits:false;initial-value:0deg}
 @keyframes spinAng{to{--ang:360deg}}
 @keyframes orbPulse{0%,100%{transform:scale(.9);opacity:.75}50%{transform:scale(1.12);opacity:1}}
 @keyframes ringOut{0%{transform:scale(.7);opacity:.7}100%{transform:scale(1.7);opacity:0}}
 @keyframes cornerGlow{0%,100%{opacity:.55}50%{opacity:1}}
 @keyframes slideUp{from{opacity:0;transform:translate3d(0,26px,0)}to{opacity:1;transform:none}}
-.aura{--ac1:128,140,255;--ac2:255,122,200;--ac3:84,222,255}
-.aura.light{--ac1:80,92,230;--ac2:226,70,160;--ac3:20,150,210}
+.aura{--ac1:255,255,255;--ac2:190,190,190;--ac3:255,255,255}
+.aura.light{--ac1:20,20,24;--ac2:100,100,106;--ac3:20,20,24}
 .aura .glass,.aura .modal,.aura .mdd,.aura .sheet,.aura .lvcard,.aura .ddl{-webkit-backdrop-filter:blur(22px) saturate(160%)!important;backdrop-filter:blur(22px) saturate(160%)!important}
 .aura .glass{background:linear-gradient(160deg,rgba(var(--fr),.10),rgba(var(--fr),.03))!important;box-shadow:0 10px 34px rgba(0,0,0,.38),inset 0 1px 0 rgba(var(--fr),.12)!important}
 .aura .modal,.aura .mdd{background:linear-gradient(160deg,rgba(var(--gr),.86),rgba(var(--gr),.74))!important;box-shadow:0 24px 70px rgba(0,0,0,.55),0 0 40px rgba(var(--ac1),.14)!important}
 .aura .glass::before,.aura .modal::before,.aura .mdd::before,.aura .sheet::before{content:""!important;display:block!important;position:absolute;inset:0;border-radius:inherit;padding:1.2px;pointer-events:none;
-  background:conic-gradient(from var(--ang),rgba(var(--ac1),0),rgba(var(--ac1),.95),rgba(var(--ac2),.75),rgba(var(--ac3),0) 62%,rgba(var(--ac1),0));
-  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;animation:spinAng 7s linear infinite;opacity:.8}
+  background:conic-gradient(from var(--ang),rgba(var(--ac1),0) 0%,rgba(var(--ac1),1) 16%,rgba(var(--ac2),.35) 36%,rgba(var(--ac1),0) 52%,rgba(var(--ac1),0) 100%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;animation:spinAng 4.5s linear infinite!important;opacity:1}
 .composer.glass:focus-within{box-shadow:0 10px 38px rgba(0,0,0,.4),0 0 32px rgba(var(--ac1),.32)!important}
 .composer.glass:focus-within::before{opacity:1;animation-duration:3s}
 .aura.light .glass{background:rgba(255,255,255,.72)!important;box-shadow:0 8px 28px rgba(20,20,30,.1),inset 0 0 0 1px rgba(20,20,30,.06)!important}
@@ -3671,7 +3693,6 @@ const CSS7 = `
 .aura button:not(.hb):not(.ib){transition:transform .18s var(--ease),background .2s,box-shadow .25s}
 .aura .ib:active,.aura .hb:active{transform:scale(.88)}
 .aura .eptBar .htitle.open{background:rgba(var(--fr),.1);box-shadow:0 0 22px rgba(var(--ac1),.25)}
-@media(prefers-reduced-motion:reduce){.aura .glass::before,.aura .modal::before,.aura .mdd::before{animation:none}}
 
 /* model dropdown (old style, anchored under the title) */
 .mddw{position:relative;justify-self:center}
@@ -3710,16 +3731,19 @@ const CSS7 = `
 .lvbtns .ib:hover,.lvbtns .ib.lit{box-shadow:inset 0 0 0 1px rgba(var(--ac1),.7),0 0 20px rgba(var(--ac1),.4)}
 .lvc{font-weight:500;letter-spacing:-.01em}
 
-/* assistant gesture: borderless, fading into the screen, touching both bottom corners */
-.aura.asst .lv{inset:0;padding:0;align-items:stretch}
-.aura.asst .lvcard{width:100%;height:100%;gap:14px;justify-content:flex-end;border-radius:0!important;background:none!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important;box-shadow:none!important;overflow:visible;padding:24px 20px 38px}
-.aura.asst .lvcard::before{content:"";position:absolute;inset:0;z-index:-2;background:linear-gradient(to top,rgba(var(--gr),.97) 0%,rgba(var(--gr),.9) 32%,rgba(var(--gr),.5) 66%,transparent 100%);-webkit-backdrop-filter:blur(26px) saturate(150%)!important;backdrop-filter:blur(26px) saturate(150%)!important;-webkit-mask-image:linear-gradient(to top,#000 0%,#000 50%,transparent 100%);mask-image:linear-gradient(to top,#000 0%,#000 50%,transparent 100%)}
-.aura.asst .lvcard::after{content:"";position:absolute;left:0;right:0;bottom:0;height:55%;z-index:-1;pointer-events:none;background:radial-gradient(70% 70% at 0% 100%,rgba(var(--ac1),.38),transparent 70%),radial-gradient(70% 70% at 100% 100%,rgba(var(--ac2),.32),transparent 70%);animation:cornerGlow 4s ease-in-out infinite}
-.aura.asst .lvmid{height:150px}
-.aura.asst .lvorb{width:170px;height:170px;margin:-85px 0 0 -85px}
-.aura.asst .lvc{font-size:17px;-webkit-line-clamp:3}
-.aura.asst .lvbtns{gap:18px}.aura.asst .lvbtns .ib{width:54px;height:54px}
-.aura.light.asst .lvcard{background:none!important}
+/* assistant: bottom quarter, black and white, shows replies + widgets */
+.aura.asst,.aura.light.asst{--fr:255,255,255;--fg:#fff;--gr:0,0,0;--bg:#000;--s1:#0a0a0a;--s2:#141414;--cs:dark;--ac1:255,255,255;--ac2:170,170,170;--ac3:255,255,255;color:#fff}
+.aura.asst::before{content:"";position:absolute;inset:0;z-index:0;pointer-events:none;background:linear-gradient(to top,rgba(0,0,0,.98) 0%,rgba(0,0,0,.92) 55%,rgba(0,0,0,.6) 84%,rgba(0,0,0,0) 100%);-webkit-backdrop-filter:blur(24px) saturate(120%)!important;backdrop-filter:blur(24px) saturate(120%)!important;-webkit-mask-image:linear-gradient(to top,#000 0%,#000 60%,transparent 100%);mask-image:linear-gradient(to top,#000 0%,#000 60%,transparent 100%)}
+.aura.asst::after{content:"";position:absolute;left:0;right:0;bottom:0;height:60%;z-index:1;pointer-events:none;background:radial-gradient(80% 60% at 0% 100%,rgba(255,255,255,.14),transparent 70%),radial-gradient(80% 60% at 100% 100%,rgba(255,255,255,.1),transparent 70%);animation:cornerGlow 4s ease-in-out infinite}
+.aura.asst .scroll{display:block!important;position:absolute;z-index:2;left:0;right:0;top:0;bottom:118px;padding:20px 14px 8px;overflow-y:auto;-webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 24px);mask-image:linear-gradient(to bottom,transparent 0,#000 24px)}
+.aura.asst .lv{inset:auto 0 0 0;height:auto;padding:0;z-index:3}
+.aura.asst .lvcard{width:100%;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:0 10px;padding:6px 16px 40px;border-radius:0!important;background:none!important;box-shadow:none!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important;overflow:visible;animation:none}
+.aura.asst .lvc{order:-1;width:100%;min-height:16px;font-size:12px;text-align:left;color:rgba(255,255,255,.55);-webkit-line-clamp:1}
+.aura.asst .lvmid{flex:1;width:auto;height:56px}
+.aura.asst .lvorb{width:64px;height:64px;margin:-32px 0 0 -32px}
+.aura.asst .lvring{width:44px;height:44px;margin:-22px 0 0 -22px}
+.aura.asst .lvbtns{gap:10px}.aura.asst .lvbtns .ib{width:44px;height:44px}
+.aura.asst .lvorb,.aura.asst .ph-thinking .lvorb,.aura.asst .ph-speaking .lvorb{background:radial-gradient(circle,rgba(255,255,255,.55),rgba(255,255,255,.12) 55%,transparent 72%)}
 `;
 const CSS6 = `
 /* ── v2: smooth + minimal ───────────────────────────────── */
@@ -4159,6 +4183,17 @@ function App({ assistant = false, onExit }: any) {
     if (out.length) { setAtts((a) => [...a, ...out].slice(0, 6)); setOpen(true); }
   };
 
+  const attachClick = async () => {
+    if (actions.pick) {
+      try {
+        const j = JSON.parse((await actions.pick()) || "[]");
+        const fs = j.map((x) => { const bin = atob(x.b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new File([u], x.name, { type: x.mime || "application/octet-stream" }); });
+        if (fs.length) addFiles(fs);
+      } catch (e) { flash("Could not attach that file"); }
+      return;
+    }
+    fileRef.current?.click();
+  };
   api.current = {
     regen, finish, prog,
     askKey: () => { setKeyVal(""); setKeyOpen(true); },
@@ -4251,7 +4286,7 @@ function App({ assistant = false, onExit }: any) {
           onMouseDown={(e) => { if ((e.target as any).closest("button")) e.preventDefault(); }}>
           <div className="cr"><div>
             <div className="crow">
-              <button className="ib ghost" aria-label="Attach" onClick={() => fileRef.current?.click()}><Plus size={20} {...ico} /></button>
+              <button className="ib ghost" aria-label="Attach" onClick={attachClick}><Plus size={20} {...ico} /></button>
               <button className="lbl" onClick={() => setOpen(true)}>{atts.length ? `${atts.length} attached · ` : ""}Ask {NAME} anything</button>
               <button className="ib ghost" aria-label="Start live voice" onClick={startLive}><AudioLines size={20} {...ico} /></button>
             </div>
@@ -4266,7 +4301,7 @@ function App({ assistant = false, onExit }: any) {
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               />
               <div className="tools">
-                <button className="ib ghost" aria-label="Attach" onClick={() => fileRef.current?.click()}><Plus size={20} {...ico} /></button>
+                <button className="ib ghost" aria-label="Attach" onClick={attachClick}><Plus size={20} {...ico} /></button>
                 <div className="tgs">
                   <button className={"tg" + (optOpen ? " on" : "")} aria-label="Options" aria-expanded={optOpen} onClick={() => setOptOpen(!optOpen)}><SlidersHorizontal size={15} {...ico} /><span className="tl2">{[cfg.search && "Search", cfg.think && "Think"].filter(Boolean).join(" · ") || "Options"}</span><ChevronDown size={13} {...ico} style={{ transition: "transform .15s", transform: optOpen ? "rotate(180deg)" : "none" }} /></button>
                 </div>
@@ -4314,6 +4349,7 @@ type HostProps = {
   openSettings?: () => Promise<void>;
   openApp?: () => Promise<void>;
   /** Snapshot of everything saved last time (JSON) and the action that saves a key; together they make settings persist. */
+  pick?: () => Promise<string>;
   store?: string;
   persist?: (key: string, value: string | null) => Promise<void>;
   /** true when shown by the Android assistant gesture. */
@@ -4322,7 +4358,7 @@ type HostProps = {
 const SHEET_CSS = "@keyframes epSheetIn{from{transform:translate3d(0,16%,0);opacity:0}to{transform:none;opacity:1}}";
 /** Hands the page its native actions and its saved settings BEFORE anything reads them; inside the app it waits for the saved snapshot. */
 export default function EpiqueChat(props: HostProps) {
-  setActions({ speech: props.speech, permissions: props.permissions, tts: props.tts, close: props.close, openSettings: props.openSettings, openApp: props.openApp, persist: props.persist });
+  setActions({ pick: props.pick, speech: props.speech, permissions: props.permissions, tts: props.tts, close: props.close, openSettings: props.openSettings, openApp: props.openApp, persist: props.persist });
   const ready = installStorage(props.store);
   if (inHost && !ready) return null;
   return <EpiqueSheet {...props} />;

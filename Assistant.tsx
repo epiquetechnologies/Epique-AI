@@ -8,7 +8,7 @@ import EpiqueHost, { closeAssistant } from './components/EpiqueHost';
 function Overlay() {
   const insets = useSafeAreaInsets();
   const { height } = useWindowDimensions();
-  const cardH = Math.round(height * 0.6) + insets.bottom;
+  const cardH = Math.round(height * 0.26) + insets.bottom;
   const t = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.timing(t, { toValue: 1, duration: 260, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
