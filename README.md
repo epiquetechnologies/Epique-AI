@@ -31,3 +31,14 @@ Known: blob downloads, getDisplayMedia (screen share) are not supported by Andro
 - **Assistant overlay.** Native backdrop (tap anywhere outside to close) plus a small card; `AssistantActivity` finishes itself as soon as it is stopped, so it can no longer sit invisibly over the screen. Without a saved key the card shows an *Open Epique AI* button.
 - **UI.** No pill behind the header (icons fade out when idle, return on touch); settings and chats are minimal modals (chats are grouped with previews and a ⋯ menu); fonts are tappable chips; the voice picker is an inline list. All `backdrop-filter` blur is gone and the sheet no longer re-renders the chat while dragging.
 - Removed: PIN lock, profiles UI, MCP connectors, widgets list, backup/import, logo colour, reduce-motion toggle, Maps key field (the build-time key still works).
+
+## What changed in v3 (verified in a headless browser, not just typechecked)
+- **Header.** The "border" behind the top icons was a CSS collision: the header used the class names `hd` / `hr`, which the Markdown renderer also uses for headings and horizontal rules, so the right-hand icons were squashed into a 1px gradient line. The header now has unique class names (`eptBar`, `eptL`, `eptR`), no background at all, and its icons fade after 2.8 s and return on touch. The Home model title had the same kind of clash with the model list (`.mod`) and is fixed too.
+- **Voice never needs a key.** Replies and Live mode are read aloud with the phone's own voice (`expo-speech`, native action `tts`). ElevenLabs is optional: with a key saved the voice picker appears, without one Settings just says "Phone voice". The repeating "ElevenLabs key missing" message is gone.
+- **Saved settings are guaranteed to be loaded before the page renders** (the page waits for the saved snapshot inside the app), so the Gemini key is never "forgotten" in the app or the assistant overlay.
+- **Microphone.** The system permission dialog is requested on app start until it is granted (Android stops showing it itself after two refusals, then Live offers *Open settings*), and again whenever voice starts.
+- **Sheet.** The drag handle's hit area is a small centred strip instead of a full-width bar that swallowed taps over the header and modals; dragging no longer re-lays-out the whole page (`contain`).
+- **Fonts.** The whole font list is preloaded when Settings opens, so every chip previews in its own typeface; picking one applies and persists.
+
+Checks run for this version: `npx tsc --noEmit` (0 errors), `npx expo prebuild --platform android` (plugin output reviewed against the generated `MainActivity`), `npx expo export --platform android` (app bundle + DOM bundle compile), and a headless Chromium walk-through at 390x844 (header, idle fade, settings, key save, fonts, chats, models, assistant card with and without a key, spoken reply without any key). Still not run on a physical Android device.
+

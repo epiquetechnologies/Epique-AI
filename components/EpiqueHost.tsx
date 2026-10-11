@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { BackHandler, Linking, PermissionsAndroid, Platform } from 'react-native';
 import Storage from 'expo-sqlite/kv-store';
+import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import EpiqueChat from './EpiqueChat';
 
@@ -61,12 +62,16 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
   useSpeechRecognitionEvent('error', (e) => emit('error', { error: e.error, message: e.message }));
   useSpeechRecognitionEvent('end', () => { emit('end'); });
 
-  // Ask for the microphone once, the first time the real app opens, so the system prompt appears up front.
+  // Ask for the microphone when the real app opens, until it is granted. Android stops showing the dialog by itself after two
+  // refusals, and then the voice screen offers "Open settings". The count is only raised when the user did not allow it.
   useEffect(() => {
     if (assistant) return;
     const t = setTimeout(async () => {
-      try { if (Storage.getItemSync('native.micAsked')) return; Storage.setItemSync('native.micAsked', '1'); } catch (e) {}
-      await ensureMic();
+      let asked = 0;
+      try { asked = Number(Storage.getItemSync('native.micAsks') || 0); } catch (e) {}
+      if (asked >= 2) return;
+      const m = await ensureMic();
+      if (m !== 'granted') { try { Storage.setItemSync('native.micAsks', String(asked + 1)); } catch (e) {} }
     }, 900);
     return () => clearTimeout(t);
   }, [assistant]);
@@ -98,6 +103,18 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
     return true;
   }, []);
 
+  // Reads replies aloud with the phone's own voice (works without any cloud key). Resolves when the sentence is done.
+  const tts = useCallback((c: { op: string; text?: string; rate?: number; lang?: string }) => {
+    if (c.op === 'stop') { try { Speech.stop(); } catch (e) {} return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      let over = false; const fin = () => { if (!over) { over = true; resolve(); } };
+      try { Speech.speak(c.text || '', { language: c.lang, rate: Math.max(0.5, Math.min(2, c.rate || 1)), onDone: fin, onStopped: fin, onError: fin }); } catch (e) { fin(); }
+    });
+  }, []);
+  // Never leave the phone talking after the screen goes away.
+  useEffect(() => () => { try { Speech.stop(); } catch (e) {} }, []);
+
   const close = useCallback(async () => { closeAssistant(); }, []);
   const openSettings = useCallback(async () => { try { await Linking.openSettings(); } catch (e) {} }, []);
   const openApp = useCallback(async () => { try { await Linking.openURL('epique://'); } catch (e) {} closeAssistant(); }, []);
@@ -110,6 +127,7 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
       persist={persist}
       speech={speech}
       permissions={permissions}
+      tts={tts}
       close={close}
       openSettings={openSettings}
       openApp={openApp}

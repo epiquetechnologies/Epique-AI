@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo, useCallback, memo, Component, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { setActions, speechEvent, actions, installStorage } from "./native-bridge";
+import { setActions, speechEvent, actions, installStorage, inHost } from "./native-bridge";
 import { useDOMImperativeHandle } from "expo/dom";
 import {
   Send, AudioLines, Plus, Copy, Check, RefreshCw, X, Mic, MicOff,
@@ -2724,7 +2724,7 @@ const elFail = async (r, m?) => {
 };
 const elAudio = async (t) => {
   const k = elKey(), m = elModel();
-  if (!k) throw new Error("ElevenLabs key missing. Add it in Settings > Keys.");
+  if (!k) throw new Error("ElevenLabs key missing. Add it in Settings, or clear the Coqui address to use your phone\u2019s voice.");
   let r;
   try { r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elVoice()}?output_format=mp3_44100_64`, { method: "POST", signal: AbortSignal.timeout?.(20000), headers: { "xi-api-key": k, "Content-Type": "application/json", Accept: "audio/mpeg" }, body: JSON.stringify({ text: t, model_id: m }) }); }
   catch (e) { throw new Error(e?.name === "TimeoutError" ? `ElevenLabs timed out (${m}).` : `Could not reach ElevenLabs: ${e?.message || e}`); }
@@ -2736,6 +2736,13 @@ const coquiAudio = async (t) => {
   if (!r.ok) throw new Error(`Coqui ${r.status}`);
   return blobAudio(r);
 };
+/* The phone's own voice: used whenever no cloud voice (ElevenLabs / Coqui) is configured, so replies are always spoken and no key is ever required. */
+const cloudVoice = () => !!(elKey() || coquiUrl());
+const deviceSpeak = (text: string, rate?: number): Promise<void> => {
+  if (actions.tts) return actions.tts({ op: "speak", text, rate: rate || 1, lang: navigator.language || "en-US" }).catch(() => {});
+  return new Promise<void>((res) => { try { const u = new SpeechSynthesisUtterance(text); u.rate = rate || 1; u.onend = () => res(); u.onerror = () => res(); speechSynthesis.speak(u); } catch (e) { res(); } });
+};
+const deviceStop = () => { try { if (actions.tts) { actions.tts({ op: "stop" }).catch(() => {}); } else if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); } catch (e) {} };
 const getAudio = async (t) => {
   try { return await elAudio(t); }
   catch (e) { if (!coquiUrl()) throw e; try { return await coquiAudio(t); } catch (e2) { throw new Error(`${e.message} Coqui backup also failed: ${e2.message}`); } }
@@ -2743,10 +2750,11 @@ const getAudio = async (t) => {
 const tts = (() => {
   let a = null, id = 0, end = null;
   const parts = (t) => { const o = []; let c = ""; for (const x of t.match(/[^.!?\n]+[.!?]*\s*/g) || [t]) { if ((c + x).length > 260 && c) { o.push(c); c = ""; } c += x; } if (c.trim()) o.push(c); return o; };
-  const stop = () => { id++; try { a?.pause(); } catch (e) {} a = null; const f = end; end = null; f?.(); };
+  const stop = () => { id++; try { a?.pause(); } catch (e) {} a = null; deviceStop(); const f = end; end = null; f?.(); };
   const play = (text, rate, done?) => {
     stop(); const my = id, list = parts(brief(cleanSpeech(text))); end = done;
     const fin = () => { if (my === id) { end = null; done?.(); } };
+    if (!cloudVoice()) { (async () => { for (const part of list) { if (my !== id) return; await deviceSpeak(part, rate); } fin(); })(); return; }
     const pre = [], get = (i) => pre[i] || (pre[i] = getAudio(list[i]), pre[i].catch(() => {}), pre[i]);
     const next = async (i) => {
       if (my !== id) return; if (i >= list.length) return fin();
@@ -2768,12 +2776,13 @@ function makeSpeaker(cfg) {
     busy = true; const g = gen; let tm;
     const done = () => { if (g !== gen || !busy) return; clearTimeout(tm); try { au?.pause(); } catch (e) {} busy = false; pump(); };
     tm = setTimeout(done, Math.min(25000, 3000 + t.length * 90));
+    if (!cloudVoice()) { deviceSpeak(t, cfg.rate).then(done, done); return; }
     const bad = (e?) => { if (g !== gen) return; reportTts(e?.message || "Audio playback failed."); done(); };
     getAudio(t).then((x) => { if (g !== gen) return; au = x; au.playbackRate = cfg.rate || 1; au.onended = done; au.onerror = () => bad(); return au.play(); }).catch(bad);
   };
   return {
     say(t) { t = cleanSpeech(t); if (t) { q.push(t); pump(); } },
-    stop() { gen++; q = []; busy = false; try { au?.pause(); } catch (e) {} idle(); },
+    stop() { gen++; q = []; busy = false; try { au?.pause(); } catch (e) {} deviceStop(); idle(); },
     idle() { return !busy && !q.length ? Promise.resolve() : new Promise((r) => waiters.push(r)); },
     kill() { dead = true; this.stop(); },
   };
@@ -3018,9 +3027,10 @@ function KeyField({ label, hint, has, builtIn, onSave, onClear, onSaved }: any) 
 /* ── Settings (minimal modal) ───────────────────────────── */
 const Seg = ({ value, opts, on }: any) => <div className="mseg">{opts.map(([k, n]) => <button key={k} className={value === k ? "on" : ""} onClick={() => on(k)}>{n}</button>)}</div>;
 function SettingsModal({ prof, cfg, setCfg, onProfile, onClose, onClearChats }: any) {
-  const [vl, setVl] = useState<any>([]), [vv, setVv] = useState<any>(elVoice()), [vopen, setVopen] = useState<any>(false), [vq, setVq] = useState<any>(""), [msg, setMsg] = useState<any>(""), [sure, setSure] = useState<any>(false), [busy, setBusy] = useState<any>(false);
+  const [vl, setVl] = useState<any>([]), [vv, setVv] = useState<any>(elVoice()), [vopen, setVopen] = useState<any>(false), [vq, setVq] = useState<any>(""), [msg, setMsg] = useState<any>(""), [sure, setSure] = useState<any>(false), [busy, setBusy] = useState<any>(false), [hasEl, setHasEl] = useState<any>(() => !!elKey());
   useEffect(() => { const prev = ttsSink; ttsSink = (m) => setMsg(m); return () => { ttsSink = prev; }; }, []);
   useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
+  useEffect(() => { FONTS.forEach(ensureFont); }, []);
   const loadVoices = async () => {
     const k = elKey(); if (!k) return setMsg("Add your ElevenLabs key first.");
     setBusy(true);
@@ -3050,11 +3060,12 @@ function SettingsModal({ prof, cfg, setCfg, onProfile, onClose, onClearChats }: 
 
           <div className="ms">Keys</div>
           <KeyField label="Gemini" has={!!lsGet(KEY_STORE) || !!mem.key} builtIn={!!ENV_KEY} onSave={(t) => saveKey(t)} onClear={() => saveKey("")} />
-          <KeyField label="ElevenLabs (voice)" has={!!lsGet("epique.el")} builtIn={!!ENV_EL} onSave={(t) => { saveLS("epique.el", cleanKey(t)); setMsg(""); }} onClear={() => { saveLS("epique.el", ""); setVl([]); }} onSaved={() => setTimeout(loadVoices, 50)} />
+          <KeyField label="ElevenLabs (optional)" hint="Not needed. Without it, replies are read in your phone's voice." has={!!lsGet("epique.el")} builtIn={!!ENV_EL} onSave={(t) => { saveLS("epique.el", cleanKey(t)); setMsg(""); setHasEl(true); }} onClear={() => { saveLS("epique.el", ""); setVl([]); setVopen(false); setHasEl(!!ENV_EL); }} onSaved={() => setTimeout(loadVoices, 50)} />
 
           <div className="ms">Voice</div>
-          <button className="mr pick" aria-expanded={vopen} onClick={() => setVopen(!vopen)}><span>Voice</span><b>{cur}</b><ChevronDown size={15} {...ico} style={{ transition: "transform .2s ease", transform: vopen ? "rotate(180deg)" : "none" }} /></button>
-          {vopen && (
+          {hasEl ? <button className="mr pick" aria-expanded={vopen} onClick={() => setVopen(!vopen)}><span>Voice</span><b>{cur}</b><ChevronDown size={15} {...ico} style={{ transition: "transform .2s ease", transform: vopen ? "rotate(180deg)" : "none" }} /></button>
+            : <div className="mr"><span>Voice</span><b className="mval">Phone voice</b></div>}
+          {hasEl && vopen && (
             <div className="vbox">
               <input className="vs" value={vq} placeholder={vl.length ? "Search voices" : busy ? "Loading voices…" : "Voices load once your key is saved"} autoCapitalize="none" onChange={(e) => setVq(e.target.value)} />
               <div className="vlist">
@@ -3096,7 +3107,7 @@ function Panel({ tab, setTab, chats, cid, model, onModel, onOpen, onNew, onRenam
           <button className="ib sm ghost" aria-label="Close" onClick={onClose}><X size={16} {...ico} /></button>
         </div>
         {tab === "models" ? (
-          <div className="mb">{MODELS.map((m) => <button key={m.id} className={"mod" + (m.id === model ? " on" : "")} onClick={() => onModel(m.id)}><div><b>{m.n}</b><span>{m.d}</span></div>{m.id === model && <Check size={17} {...ico} />}</button>)}</div>
+          <div className="mb">{MODELS.map((m) => <button key={m.id} className={"epModel" + (m.id === model ? " on" : "")} onClick={() => onModel(m.id)}><div><b>{m.n}</b><span>{m.d}</span></div>{m.id === model && <Check size={17} {...ico} />}</button>)}</div>
         ) : (
           <>
             <div className="ctop">
@@ -3472,7 +3483,7 @@ const CSS4 = `
 /* ── Attachments ────────────────────────────────────────── */
 const CSS3 = `
 .head{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:calc(22px + var(--sat,0px)) 10px 8px}
-.head>.ib{justify-self:start}.hr{justify-self:end;display:flex;align-items:center;gap:2px}
+.head>.ib{justify-self:start}
 .model.tt{background:none;box-shadow:none;border:0;color:var(--fg);height:36px;padding:0 12px;gap:7px;letter-spacing:-.02em;transition:background .13s,transform .15s cubic-bezier(.34,1.56,.64,1)}
 .model.tt:hover{background:rgba(var(--fr),.07)}
 .menu{left:50%;translate:-50% 0;transform-origin:top center;top:calc(60px + var(--sat,0px))}
@@ -3627,17 +3638,19 @@ const CSS6 = `
 .aura button{-webkit-tap-highlight-color:transparent}
 .aura .scroll{overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 
-/* header: no pill, no background. Just icons that fade away when idle */
-.hd{position:absolute;top:0;left:0;right:0;z-index:30;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:calc(20px + var(--sat,0px)) 10px 4px;pointer-events:none}
-.hd>*{pointer-events:auto}
-.hd .hl{justify-self:start;display:flex}.hd .hr{justify-self:end;display:flex;gap:0}
-.hb{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;color:rgba(var(--fr),.88);background:transparent;transition:opacity .45s ease,transform .2s var(--ease),background .2s ease}
+/* header: no pill, no background. Just icons that fade away when idle.
+   (class names are unique on purpose: .hd / .hr are the Markdown heading and rule styles) */
+.eptBar{position:absolute;top:0;left:0;right:0;z-index:30;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;margin:0;padding:calc(20px + var(--sat,0px)) 10px 4px;background:none;box-shadow:none;border:0;pointer-events:none}
+.eptBar>*{pointer-events:auto}
+.eptL{justify-self:start;display:flex;align-items:center}
+.eptR{justify-self:end;display:flex;align-items:center;gap:0}
+.hb{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;color:rgba(var(--fr),.88);background:transparent;box-shadow:none;transition:opacity .5s ease,transform .2s var(--ease),background .2s ease}
 .hb:active{transform:scale(.86);background:rgba(var(--fr),.1)}
-.htitle{display:flex;align-items:center;gap:8px;height:42px;padding:0 12px;border-radius:999px;font-size:15px;font-weight:600;color:var(--fg);background:transparent;transition:opacity .45s ease,transform .2s var(--ease),background .2s ease}
+.htitle{display:flex;align-items:center;gap:8px;height:42px;padding:0 12px;border-radius:999px;font-size:15px;font-weight:600;color:var(--fg);background:transparent;box-shadow:none;transition:opacity .5s ease,transform .2s var(--ease),background .2s ease}
 .htitle:active{transform:scale(.96);background:rgba(var(--fr),.08)}
-.hd.dim .hb{opacity:0}
-.hd.dim .htitle{opacity:.55}
-.aura.asst .hd{display:none!important}
+.eptBar.dim .hb{opacity:0}
+.eptBar.dim .htitle{opacity:.5}
+.aura.asst .eptBar{display:none!important}
 
 /* modals (settings, chats, key) */
 @keyframes mfade{from{opacity:0}to{opacity:1}}
@@ -3660,6 +3673,7 @@ const CSS6 = `
 .mr.col>span{display:flex;justify-content:space-between;color:rgba(var(--fr),.8)}
 .mr.col>span b{font-weight:600;color:var(--fg)}
 .mr.pick{padding:0;cursor:pointer}
+.mr .mval{font-weight:500;color:rgba(var(--fr),.55)}
 .mr.pick b{margin-left:auto;font-weight:500;color:rgba(var(--fr),.55);max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mseg{display:flex;padding:3px;border-radius:999px;background:rgba(var(--fr),.07)}
 .mseg button,.mtabs button{height:30px;padding:0 15px;border-radius:999px;font-size:13px;font-weight:600;color:rgba(var(--fr),.6);transition:background .22s var(--ease),color .22s ease}
@@ -3707,12 +3721,12 @@ const CSS6 = `
 .mem2 button{flex:none;width:28px;height:28px;display:grid;place-items:center;border-radius:50%;color:rgba(var(--fr),.55)}
 
 /* models */
-.mod{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:13px 16px;margin-bottom:8px;border-radius:18px;text-align:left;background:rgba(var(--fr),.045);color:var(--fg);transition:background .2s ease,transform .15s var(--ease)}
-.mod:active{transform:scale(.98)}
-.mod.on{background:rgba(var(--fr),.11);box-shadow:inset 0 0 0 1px rgba(var(--fr),.16)}
-.mod div{display:flex;flex-direction:column;gap:2px;min-width:0}
-.mod b{font-size:15px;font-weight:600}
-.mod span{font-size:12.5px;color:rgba(var(--fr),.52)}
+.epModel{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:13px 16px;margin-bottom:8px;border-radius:18px;text-align:left;background:rgba(var(--fr),.045);color:var(--fg);transition:background .2s ease,transform .15s var(--ease)}
+.epModel:active{transform:scale(.98)}
+.epModel.on{background:rgba(var(--fr),.11);box-shadow:inset 0 0 0 1px rgba(var(--fr),.16)}
+.epModel div{display:flex;flex-direction:column;gap:2px;min-width:0}
+.epModel b{font-size:15px;font-weight:600}
+.epModel span{font-size:12.5px;color:rgba(var(--fr),.52)}
 
 /* chats */
 .ctop{display:flex;gap:8px;padding:0 20px 12px;flex:none}
@@ -4092,10 +4106,10 @@ function App({ assistant = false, onExit }: any) {
       <div className="fade-b" />
       {far && msgs.length > 0 && <button className="glass ib fab pop" aria-label="Scroll to latest" onClick={() => { stick.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: "smooth" }); }}><ArrowDown size={18} {...ico} /></button>}
 
-      <header className={"hd" + (hv || panel ? "" : " dim")} onClickCapture={(e) => { if (wasDim.current) { wasDim.current = false; e.stopPropagation(); e.preventDefault(); } }}>
-        <div className="hl"><button className="hb" aria-label="Chats" onClick={() => { setPanel("chats"); }}><PanelLeft size={20} {...ico} /></button></div>
+      <header className={"eptBar" + (hv || panel ? "" : " dim")} onClickCapture={(e) => { if (wasDim.current) { wasDim.current = false; e.stopPropagation(); e.preventDefault(); } }}>
+        <div className="eptL"><button className="hb" aria-label="Chats" onClick={() => { setPanel("chats"); }}><PanelLeft size={20} {...ico} /></button></div>
         <button className="htitle" aria-label="Models" onClick={() => setPanel("models")}><Mark size={15} /><span>{model.n}</span><ChevronDown size={15} {...ico} /></button>
-        <div className="hr">
+        <div className="eptR">
           <button className="hb" aria-label="New chat" onClick={newChat}><NewChatIcon size={20} /></button>
           <button className="hb" aria-label="Settings" onClick={() => { setPanel(false); setSettings(true); }}><Settings2 size={20} {...ico} /></button>
         </div>
@@ -4197,6 +4211,7 @@ type HostProps = {
   /** Native-side actions (Expo DOM "native actions"). All optional: the component also runs as plain web. */
   speech?: (c: { op: string; id: number; lang?: string; interim?: boolean; continuous?: boolean }) => Promise<void>;
   permissions?: (p: { audio?: boolean; video?: boolean }) => Promise<boolean>;
+  tts?: (c: { op: string; text?: string; rate?: number; lang?: string }) => Promise<void>;
   close?: () => Promise<void>;
   openSettings?: () => Promise<void>;
   openApp?: () => Promise<void>;
@@ -4207,9 +4222,14 @@ type HostProps = {
   assistant?: boolean;
 };
 const SHEET_CSS = "@keyframes epSheetIn{from{transform:translate3d(0,16%,0);opacity:0}to{transform:none;opacity:1}}";
-export default function EpiqueChat({ ref: hostRef, speech, permissions, close, openSettings, openApp, persist, store, assistant }: HostProps) {
-  setActions({ speech, permissions, close, openSettings, openApp, persist });
-  installStorage(store); // must run before the first read of localStorage (App renders below)
+/** Hands the page its native actions and its saved settings BEFORE anything reads them; inside the app it waits for the saved snapshot. */
+export default function EpiqueChat(props: HostProps) {
+  setActions({ speech: props.speech, permissions: props.permissions, tts: props.tts, close: props.close, openSettings: props.openSettings, openApp: props.openApp, persist: props.persist });
+  const ready = installStorage(props.store);
+  if (inHost && !ready) return null;
+  return <EpiqueSheet {...props} />;
+}
+function EpiqueSheet({ ref: hostRef, assistant }: HostProps) {
   useDOMImperativeHandle(hostRef, () => ({ speechEvent: (id: any, type: any, json: any) => speechEvent(id, type, json) }), []);
   const ref = useRef<any>(undefined), st = useRef<any>({}), [sr, setSr] = useState<any>(null), [h, setH] = useState<any>(SNAPS[1]), [drag, setDrag] = useState<any>(false);
   // The page is created once; sheet drags re-render only the wrapper, never the whole chat.
@@ -4237,9 +4257,9 @@ export default function EpiqueChat({ ref: hostRef, speech, permissions, close, o
   return (
     <div style={{ all: "initial", position: "fixed", inset: 0, display: "block", zIndex: 2147483000 }}>
       <style>{SHEET_CSS}</style>
-      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, margin: "0 auto", width: full ? "100%" : "min(100%, 680px)", height: `${h * 100}%`, borderRadius: `${full ? 0 : 28}px ${full ? 0 : 28}px 0 0`, overflow: "hidden", background: "#050505", boxShadow: "0 0 0 1px rgba(255,255,255,.08)", animation: "epSheetIn .4s cubic-bezier(.22,1,.36,1) both", transition: drag ? "none" : "height .3s cubic-bezier(.22,1,.36,1), border-radius .2s ease, width .2s ease", "--sat": full ? "env(safe-area-inset-top,0px)" : "0px" } as any}>
+      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, margin: "0 auto", width: full ? "100%" : "min(100%, 680px)", height: `${h * 100}%`, borderRadius: `${full ? 0 : 28}px ${full ? 0 : 28}px 0 0`, overflow: "hidden", contain: "layout paint", willChange: drag ? "height" : "auto", background: "#050505", boxShadow: "0 0 0 1px rgba(255,255,255,.08)", animation: "epSheetIn .4s cubic-bezier(.22,1,.36,1) both", transition: drag ? "none" : "height .3s cubic-bezier(.22,1,.36,1), border-radius .2s ease, width .2s ease", "--sat": full ? "env(safe-area-inset-top,0px)" : "0px" } as any}>
         <div ref={ref} style={{ all: "initial", position: "absolute", inset: 0, display: "block" }}>{sr && createPortal(appEl, sr)}</div>
-        <div onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} aria-label="Drag to resize" style={{ position: "absolute", top: 0, left: 0, right: 0, height: 22, zIndex: 5, display: "grid", placeItems: "center", touchAction: "none", cursor: "grab" }}>
+        <div onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} aria-label="Drag to resize" style={{ position: "absolute", top: 0, left: "50%", width: 132, marginLeft: -66, height: 24, zIndex: 5, display: "grid", placeItems: "center", touchAction: "none", cursor: "grab" }}>
           <i style={{ width: drag ? 56 : 40, height: 5, borderRadius: 9, background: drag ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.28)", transition: "width .25s ease, background .25s" }} />
         </div>
       </div>

@@ -13,13 +13,15 @@ type Actions = {
   openSettings?: () => Promise<void>;
   openApp?: () => Promise<void>;
   persist?: (key: string, value: string | null) => Promise<void>;
+  /** The phone's own text-to-speech voice. 'speak' resolves when the sentence has finished (or was stopped). */
+  tts?: (c: { op: string; text?: string; rate?: number; lang?: string }) => Promise<void>;
 };
 
 export const actions: Actions = {};
 export const setActions = (a: Actions) => { Object.assign(actions, a); };
 
 const w: any = typeof window !== "undefined" ? window : null;
-const inHost = !!(w && (w.ReactNativeWebView || w.ExpoDomWebViewBridge || /; wv\)/.test(navigator.userAgent || "")));
+export const inHost = !!(w && (w.ReactNativeWebView || w.ExpoDomWebViewBridge || /; wv\)/.test(navigator.userAgent || "")));
 
 
 /**
@@ -28,8 +30,9 @@ const inHost = !!(w && (w.ReactNativeWebView || w.ExpoDomWebViewBridge || /; wv\
  * replace window.localStorage with a shim that is backed by native storage (SQLite key-value store).
  */
 let storageReady = false;
-export const installStorage = (json?: string) => {
-  if (storageReady || !w || json === undefined) return;
+export const installStorage = (json?: string): boolean => {
+  if (storageReady) return true;
+  if (!w || json === undefined) return false;
   storageReady = true;
   const keep = new Map<string, string>();
   try { const d = JSON.parse(json || "{}"); for (const k of Object.keys(d)) if (typeof d[k] === "string") keep.set(k, d[k]); } catch (e) {}
@@ -48,6 +51,7 @@ export const installStorage = (json?: string) => {
     get length() { return keep.size; },
   };
   try { Object.defineProperty(w, "localStorage", { value: shim, configurable: true, writable: true }); } catch (e) {}
+  return true;
 };
 
 let nextId = 1;
