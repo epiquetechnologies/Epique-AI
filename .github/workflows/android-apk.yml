@@ -21,6 +21,7 @@ jobs:
         env:
           EXPO_PUBLIC_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           EXPO_PUBLIC_GOOGLE_MAPS_KEY: ${{ secrets.GOOGLE_MAPS_KEY }}
+          EXPO_PUBLIC_ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
         run: ./gradlew assembleRelease --no-daemon
       - uses: actions/upload-artifact@v4
         with:

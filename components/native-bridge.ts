@@ -10,6 +10,7 @@ type Actions = {
   speech?: (c: { op: string; id: number; lang?: string; interim?: boolean; continuous?: boolean }) => Promise<void>;
   permissions?: (p: { audio?: boolean; video?: boolean }) => Promise<boolean>;
   close?: () => Promise<void>;
+  openSettings?: () => Promise<void>;
 };
 
 export const actions: Actions = {};

@@ -164,6 +164,8 @@ module.exports = function withEpiqueAssistant(config) {
           { $: { name: 'android:windowIsTranslucent' }, _: 'true' },
           { $: { name: 'android:windowBackground' }, _: '@android:color/transparent' },
           { $: { name: 'android:windowNoTitle' }, _: 'true' },
+          { $: { name: 'android:windowDisablePreview' }, _: 'true' },
+          { $: { name: 'android:windowContentOverlay' }, _: '@null' },
           { $: { name: 'android:backgroundDimEnabled' }, _: 'false' },
           { $: { name: 'android:statusBarColor' }, _: '@android:color/transparent' },
           { $: { name: 'android:navigationBarColor' }, _: '@android:color/transparent' },

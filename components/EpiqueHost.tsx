@@ -1,5 +1,5 @@
 import { useCallback, useRef } from 'react';
-import { BackHandler, PermissionsAndroid, Platform } from 'react-native';
+import { BackHandler, Linking, PermissionsAndroid, Platform } from 'react-native';
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import EpiqueChat from './EpiqueChat';
 
@@ -26,9 +26,12 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
 
   const speech = useCallback(async (c: { op: string; id: number; lang?: string; interim?: boolean; continuous?: boolean }) => {
     if (c.op === 'start') {
-      const p = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       cur.current = c.id;
-      if (!p.granted) { emit('error', { error: 'not-allowed' }); emit('end'); return; }
+      let p = await ExpoSpeechRecognitionModule.getPermissionsAsync();
+      if (!p.granted) p = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      // message tells the UI whether Android will still show the prompt ("denied") or the user must use system settings ("blocked").
+      if (!p.granted) { emit('error', { error: 'not-allowed', message: p.canAskAgain === false ? 'blocked' : 'denied' }); emit('end'); return; }
+      if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) { emit('error', { error: 'service-not-allowed', message: 'unavailable' }); emit('end'); return; }
       ExpoSpeechRecognitionModule.start({ lang: c.lang || 'en-US', interimResults: !!c.interim, continuous: !!c.continuous });
     } else if (c.op === 'stop') ExpoSpeechRecognitionModule.stop();
     else if (c.op === 'abort') ExpoSpeechRecognitionModule.abort();
@@ -45,6 +48,7 @@ export default function EpiqueHost({ assistant = false }: { assistant?: boolean 
   }, []);
 
   const close = useCallback(async () => { BackHandler.exitApp(); }, []);
+  const openSettings = useCallback(async () => { try { await Linking.openSettings(); } catch (e) {} }, []);
 
-  return <EpiqueChat ref={dom} dom={{ style: { flex: 1, backgroundColor: 'transparent' }, containerStyle: { backgroundColor: 'transparent' } } as any} speech={speech} permissions={permissions} close={close} assistant={assistant} />;
+  return <EpiqueChat ref={dom} dom={{ style: { flex: 1, backgroundColor: 'transparent' }, containerStyle: { backgroundColor: 'transparent' } } as any} speech={speech} permissions={permissions} close={close} openSettings={openSettings} assistant={assistant} />;
 }
