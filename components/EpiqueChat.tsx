@@ -11,7 +11,7 @@ import {
   Droplets, Wind, Thermometer, MapPin, Play, Pause, ExternalLink, Phone, Mail, Download, User,
   KeyRound, Music2, Image as ImageIcon, Navigation, MessageCircle, CalendarDays,
   BookOpen, Coins, Clock, Calculator, Wrench, SkipBack, SkipForward, Map as MapIcon, BarChart3, HelpCircle,
-  Timer as TimerIcon, Volume2, Eye, WrapText, Maximize2, AlignLeft, Code, Menu, Search, Pin, MoreHorizontal,
+  Timer as TimerIcon, Volume2, Eye, EyeOff, WrapText, Maximize2, AlignLeft, Code, Menu, Search, Pin, MoreHorizontal,
   Pencil, Trash2, Settings2, Plug, Upload, ArrowDown, FileText, PanelLeft, SlidersHorizontal,
   Crown, LayoutGrid, Trophy, Newspaper, ListChecks, StickyNote, Bell, Link2, Vote, Hourglass, Rocket, Flag, UtensilsCrossed,
 } from "lucide-react";
@@ -2743,6 +2743,18 @@ const deviceSpeak = (text: string, rate?: number): Promise<void> => {
   return new Promise<void>((res) => { try { const u = new SpeechSynthesisUtterance(text); u.rate = rate || 1; u.onend = () => res(); u.onerror = () => res(); speechSynthesis.speak(u); } catch (e) { res(); } });
 };
 const deviceStop = () => { try { if (actions.tts) { actions.tts({ op: "stop" }).catch(() => {}); } else if (typeof speechSynthesis !== "undefined") speechSynthesis.cancel(); } catch (e) {} };
+let audioUnlocked = false;
+const unlockAudio = () => {
+  if (audioUnlocked) return; audioUnlocked = true;
+  try { const C = (window as any).AudioContext || (window as any).webkitAudioContext; if (C) { const c = new C(); c.resume?.(); const b = c.createBufferSource(); b.buffer = c.createBuffer(1, 1, 22050); b.connect(c.destination); b.start(0); setTimeout(() => c.close?.(), 400); } } catch (e) {}
+  try { const a = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAABErAAABAAgAZGF0YQAAAAA="); a.volume = 0; a.play().catch(() => { audioUnlocked = false; }); } catch (e) {}
+};
+if (typeof window !== "undefined") ["pointerdown", "touchstart", "keydown", "click"].forEach((ev) => window.addEventListener(ev, unlockAudio, { passive: true, capture: true } as any));
+// If the browser still refuses autoplay (assistant opened by gesture, no tap yet) fall back to the phone's own voice instead of erroring.
+const safePlay = (au: any, text: string, rate?: number) => au.play().catch((e) => {
+  if (e?.name === "NotAllowedError") { audioUnlocked = false; return deviceSpeak(text, rate).then(() => { try { au.onended?.(new Event("ended")); } catch (x) {} }); }
+  throw e;
+});
 const getAudio = async (t) => {
   try { return await elAudio(t); }
   catch (e) { if (!coquiUrl()) throw e; try { return await coquiAudio(t); } catch (e2) { throw new Error(`${e.message} Coqui backup also failed: ${e2.message}`); } }
@@ -2761,7 +2773,7 @@ const tts = (() => {
       let au; try { au = await get(i); } catch (e) { if (my === id) { reportTts(e.message); fin(); } return; }
       if (my !== id) return; a = au; if (list[i + 1]) get(i + 1);
       const bad = (e?) => { if (my !== id) return; reportTts(e?.message ? "Audio playback failed: " + e.message : "Audio playback failed."); fin(); };
-      au.playbackRate = rate || 1; au.onended = () => next(i + 1); au.onerror = () => bad(); au.play().catch(bad);
+      au.playbackRate = rate || 1; au.onended = () => next(i + 1); au.onerror = () => bad(); safePlay(au, list[i], rate).catch(bad);
     };
     next(0);
   };
@@ -2778,7 +2790,7 @@ function makeSpeaker(cfg) {
     tm = setTimeout(done, Math.min(25000, 3000 + t.length * 90));
     if (!cloudVoice()) { deviceSpeak(t, cfg.rate).then(done, done); return; }
     const bad = (e?) => { if (g !== gen) return; reportTts(e?.message || "Audio playback failed."); done(); };
-    getAudio(t).then((x) => { if (g !== gen) return; au = x; au.playbackRate = cfg.rate || 1; au.onended = done; au.onerror = () => bad(); return au.play(); }).catch(bad);
+    getAudio(t).then((x) => { if (g !== gen) return; au = x; au.playbackRate = cfg.rate || 1; au.onended = done; au.onerror = () => bad(); return safePlay(au, t, cfg.rate); }).catch(bad);
   };
   return {
     say(t) { t = cleanSpeech(t); if (t) { q.push(t); pump(); } },
@@ -2936,10 +2948,10 @@ function Live({ onTurn, onAbort, onClose, cfg, assistant }: any) {
   const line = err ? err.m : cap || (muted && !busy ? "Mic muted" : phase === "speaking" ? "Tap to interrupt" : LABEL[phase]);
   return (
     <div className="lv">
-      <div className="lvcard">
+      <div className={"lvcard ph-" + phase + (muted ? " muted" : "")}>
         <div className={"lvc" + (cap && !err ? "" : " dim")} key={err ? "e" : cap ? "c" : phase}>{line}</div>
         {err && <div className="lvact">{err.k === "blocked" && <button className="tg on" onClick={() => actions.openSettings?.()}>Open settings</button>}<button className={"tg" + (err.k === "blocked" ? "" : " on")} onClick={retry}>Try again</button></div>}
-        <div className="lvmid" onClick={() => busy && S.current.interrupt?.()}><canvas className="lvw" ref={cv} /></div>
+        <div className="lvmid" onClick={() => { unlockAudio(); if (busy) S.current.interrupt?.(); }}><i className="lvorb" /><i className="lvring" /><canvas className="lvw" ref={cv} /></div>
         <div className="lvbtns">
           <button className={"ib ghost lvb" + (muted ? " lit" : "")} aria-label="Toggle microphone" onClick={toggleMute}>{muted ? <MicOff size={19} {...ico} /> : <Mic size={19} {...ico} />}</button>
           <button className="ib ghost lvb" aria-label="End live voice" onClick={onClose}><X size={19} {...ico} /></button>
@@ -3007,19 +3019,27 @@ const preview = (c: any) => { const m = [...(c.msgs || [])].reverse().find((x: a
 
 /** A key field with an explicit Save button and a visible saved / not set state. */
 function KeyField({ label, hint, has, builtIn, onSave, onClear, onSaved }: any) {
-  const [v, setV] = useState<any>(""), [ok, setOk] = useState<any>(false), [saved, setSaved] = useState<any>(!!has);
+  const [v, setV] = useState<any>(""), [ok, setOk] = useState<any>(false), [saved, setSaved] = useState<any>(!!has), [open, setOpen] = useState<any>(false), [show, setShow] = useState<any>(false);
   const t = v.trim();
-  const commit = () => { if (!t) return; onSave(t); setV(""); setSaved(true); setOk(true); setTimeout(() => setOk(false), 1800); onSaved?.(t); };
+  const commit = () => { if (!t) return; onSave(t); setV(""); setSaved(true); setOk(true); setShow(false); setTimeout(() => { setOk(false); setOpen(false); }, 1100); onSaved?.(t); };
   return (
-    <div className="kf">
-      <div className="kfh"><span>{label}</span><em className={ok || saved || builtIn ? "ok" : ""}>{ok ? "Saved" : saved ? "Saved on this device" : builtIn ? "Built in" : "Not set"}</em></div>
-      <div className="kfr">
-        <input type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} value={v} placeholder={saved || builtIn ? "Paste a new key to replace" : "Paste your key"}
-          onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
-        <button className={"kbtn" + (t ? " go" : "")} disabled={!t} onClick={commit}>{ok ? <Check size={16} {...ico} /> : "Save"}</button>
-      </div>
-      {hint && <p className="mhint">{hint}</p>}
-      {saved && <button className="klink" onClick={() => { onClear(); setSaved(false); }}>Remove key</button>}
+    <div className={"kf" + (open ? " open" : "")}>
+      <button className="kfh kft" aria-expanded={open} onClick={() => setOpen(!open)}>
+        <span>{label}</span><em className={ok || saved || builtIn ? "ok" : ""}>{ok ? "Saved" : saved ? "Saved on this device" : builtIn ? "Built in" : "Not set"}</em>
+        <ChevronDown size={15} {...ico} style={{ transition: "transform .25s ease", transform: open ? "rotate(180deg)" : "none" }} />
+      </button>
+      {open && (
+        <div className="kfb">
+          <div className="kfr">
+            <input type={show ? "text" : "password"} autoComplete="off" autoCapitalize="none" spellCheck={false} value={v} placeholder={saved || builtIn ? "Paste a new key to replace" : "Paste your key"}
+              onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
+            <button className="kbtn eye" aria-label={show ? "Hide key" : "Show key"} onClick={() => setShow(!show)}>{show ? <EyeOff size={16} {...ico} /> : <Eye size={16} {...ico} />}</button>
+            <button className={"kbtn" + (t ? " go" : "")} disabled={!t} onClick={commit}>{ok ? <Check size={16} {...ico} /> : "Save"}</button>
+          </div>
+          {hint && <p className="mhint">{hint}</p>}
+          {saved && <button className="klink" onClick={() => { onClear(); setSaved(false); }}>Remove key</button>}
+        </div>
+      )}
     </div>
   );
 }
@@ -3027,6 +3047,7 @@ function KeyField({ label, hint, has, builtIn, onSave, onClear, onSaved }: any) 
 /* ── Settings (minimal modal) ───────────────────────────── */
 const Seg = ({ value, opts, on }: any) => <div className="mseg">{opts.map(([k, n]) => <button key={k} className={value === k ? "on" : ""} onClick={() => on(k)}>{n}</button>)}</div>;
 function SettingsModal({ prof, cfg, setCfg, onProfile, onClose, onClearChats }: any) {
+  const [fopen, setFopen] = useState<any>(false);
   const [vl, setVl] = useState<any>([]), [vv, setVv] = useState<any>(elVoice()), [vopen, setVopen] = useState<any>(false), [vq, setVq] = useState<any>(""), [msg, setMsg] = useState<any>(""), [sure, setSure] = useState<any>(false), [busy, setBusy] = useState<any>(false), [hasEl, setHasEl] = useState<any>(() => !!elKey());
   useEffect(() => { const prev = ttsSink; ttsSink = (m) => setMsg(m); return () => { ttsSink = prev; }; }, []);
   useEffect(() => { const k = (e) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
@@ -3056,7 +3077,7 @@ function SettingsModal({ prof, cfg, setCfg, onProfile, onClose, onClearChats }: 
           <div className="ms">Appearance</div>
           <div className="mr"><span>Theme</span><Seg value={cfg.theme} opts={[["dark", "Dark"], ["light", "Light"]]} on={(k) => setCfg({ theme: k })} /></div>
           <div className="mr"><span>Text size</span><Seg value={cfg.fs || "m"} opts={[["s", "S"], ["m", "M"], ["l", "L"]]} on={(k) => setCfg({ fs: k })} /></div>
-          <div className="mr col"><span>Font</span><div className="fgrid">{FONTS.map((x) => <button key={x.id} className={"fchip" + ((cfg.font || "inter") === x.id ? " on" : "")} style={{ fontFamily: x.css }} onClick={() => pickFont(x)}>{x.n}</button>)}</div></div>
+          <div className="mr col"><span>Font</span><div className="fdw"><button className={"fdb" + (fopen ? " open" : "")} aria-expanded={fopen} onClick={() => setFopen(!fopen)} style={{ fontFamily: (FONTS.find((x) => x.id === (cfg.font || "inter")) || FONTS[0]).css }}><span>{(FONTS.find((x) => x.id === (cfg.font || "inter")) || FONTS[0]).n}</span><ChevronDown size={15} {...ico} style={{ transition: "transform .25s ease", transform: fopen ? "rotate(180deg)" : "none" }} /></button>{fopen && <div className="fdl">{FONTS.map((x) => <button key={x.id} className={(cfg.font || "inter") === x.id ? "on" : ""} style={{ fontFamily: x.css }} onClick={() => { pickFont(x); setFopen(false); }}><span>{x.n}</span>{(cfg.font || "inter") === x.id && <Check size={14} {...ico} />}</button>)}</div>}</div></div>
 
           <div className="ms">Keys</div>
           <KeyField label="Gemini" has={!!lsGet(KEY_STORE) || !!mem.key} builtIn={!!ENV_KEY} onSave={(t) => saveKey(t)} onClear={() => saveKey("")} />
@@ -3625,6 +3646,81 @@ const CSS5 = `
 .aura.light .seg button.on,.aura.light .tg.on{box-shadow:none}
 .aura.light.asst .lvcard{background:#fff}
 `;
+
+const CSS7 = `
+/* ── v4: glass + glow restored, live reborn ─────────────── */
+@property --ang{syntax:'<angle>';inherits:false;initial-value:0deg}
+@keyframes spinAng{to{--ang:360deg}}
+@keyframes orbPulse{0%,100%{transform:scale(.9);opacity:.75}50%{transform:scale(1.12);opacity:1}}
+@keyframes ringOut{0%{transform:scale(.7);opacity:.7}100%{transform:scale(1.7);opacity:0}}
+@keyframes cornerGlow{0%,100%{opacity:.55}50%{opacity:1}}
+@keyframes slideUp{from{opacity:0;transform:translate3d(0,26px,0)}to{opacity:1;transform:none}}
+.aura{--ac1:128,140,255;--ac2:255,122,200;--ac3:84,222,255}
+.aura.light{--ac1:80,92,230;--ac2:226,70,160;--ac3:20,150,210}
+.aura .glass,.aura .modal,.aura .mdd,.aura .sheet,.aura .lvcard,.aura .ddl{-webkit-backdrop-filter:blur(22px) saturate(160%)!important;backdrop-filter:blur(22px) saturate(160%)!important}
+.aura .glass{background:linear-gradient(160deg,rgba(var(--fr),.10),rgba(var(--fr),.03))!important;box-shadow:0 10px 34px rgba(0,0,0,.38),inset 0 1px 0 rgba(var(--fr),.12)!important}
+.aura .modal,.aura .mdd{background:linear-gradient(160deg,rgba(var(--gr),.86),rgba(var(--gr),.74))!important;box-shadow:0 24px 70px rgba(0,0,0,.55),0 0 40px rgba(var(--ac1),.14)!important}
+.aura .glass::before,.aura .modal::before,.aura .mdd::before,.aura .sheet::before{content:""!important;display:block!important;position:absolute;inset:0;border-radius:inherit;padding:1.2px;pointer-events:none;
+  background:conic-gradient(from var(--ang),rgba(var(--ac1),0),rgba(var(--ac1),.95),rgba(var(--ac2),.75),rgba(var(--ac3),0) 62%,rgba(var(--ac1),0));
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);mask-composite:exclude;animation:spinAng 7s linear infinite;opacity:.8}
+.composer.glass:focus-within{box-shadow:0 10px 38px rgba(0,0,0,.4),0 0 32px rgba(var(--ac1),.32)!important}
+.composer.glass:focus-within::before{opacity:1;animation-duration:3s}
+.aura.light .glass{background:rgba(255,255,255,.72)!important;box-shadow:0 8px 28px rgba(20,20,30,.1),inset 0 0 0 1px rgba(20,20,30,.06)!important}
+.aura.light .modal,.aura.light .mdd{background:rgba(255,255,255,.88)!important;box-shadow:0 24px 60px rgba(20,20,30,.18)!important}
+.aura .fchip.on,.aura .tg.on,.aura .kbtn.go,.aura .seg button.on{box-shadow:0 0 18px rgba(var(--ac1),.45)}
+.aura button:not(.hb):not(.ib){transition:transform .18s var(--ease),background .2s,box-shadow .25s}
+.aura .ib:active,.aura .hb:active{transform:scale(.88)}
+.aura .eptBar .htitle.open{background:rgba(var(--fr),.1);box-shadow:0 0 22px rgba(var(--ac1),.25)}
+@media(prefers-reduced-motion:reduce){.aura .glass::before,.aura .modal::before,.aura .mdd::before{animation:none}}
+
+/* model dropdown (old style, anchored under the title) */
+.mddw{position:relative;justify-self:center}
+.mdscrim{position:absolute;inset:0;z-index:29}
+.mdd{position:absolute;top:calc(100% + 8px);left:50%;translate:-50% 0;z-index:45;width:min(310px,calc(100vw - 28px));padding:8px;border-radius:22px;animation:mpop .2s var(--ease) both}
+.mdd button{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:11px 13px;border-radius:15px;text-align:left;color:var(--fg)}
+.mdd button div{display:flex;flex-direction:column;gap:2px;min-width:0}
+.mdd button b{font-size:14.5px;font-weight:600}.mdd button span{font-size:12px;color:rgba(var(--fr),.52)}
+.mdd button:hover,.mdd button:active{background:rgba(var(--fr),.08)}
+.mdd button.on{background:rgba(var(--fr),.1);box-shadow:inset 0 0 0 1px rgba(var(--ac1),.45)}
+
+/* settings: font dropdown + collapsible keys */
+.fdw{position:relative}
+.fdb{display:flex;align-items:center;justify-content:space-between;width:100%;height:46px;padding:0 14px;border-radius:14px;font-size:15px;color:var(--fg);background:rgba(var(--fr),.06);box-shadow:inset 0 0 0 1px rgba(var(--fr),.1)}
+.fdb.open{box-shadow:inset 0 0 0 1.2px rgba(var(--ac1),.75),0 0 20px rgba(var(--ac1),.25)}
+.fdl{margin-top:6px;max-height:228px;overflow-y:auto;padding:6px;border-radius:16px;background:rgba(var(--fr),.05);box-shadow:inset 0 0 0 1px rgba(var(--fr),.1);animation:mrise .2s var(--ease) both}
+.fdl button{display:flex;align-items:center;justify-content:space-between;width:100%;padding:10px 12px;border-radius:11px;font-size:15px;color:var(--fg);text-align:left}
+.fdl button.on,.fdl button:active{background:rgba(var(--fr),.1)}
+.kf{padding:2px 14px;border-radius:16px;background:rgba(var(--fr),.04);box-shadow:inset 0 0 0 1px rgba(var(--fr),.08);transition:box-shadow .25s}
+.kf.open{box-shadow:inset 0 0 0 1.2px rgba(var(--ac1),.6),0 0 22px rgba(var(--ac1),.18)}
+.kft{display:flex;align-items:center;gap:10px;width:100%;min-height:46px;margin:0;text-align:left;color:var(--fg)}
+.kft em{margin-left:auto}
+.kfb{padding-bottom:12px;animation:mrise .2s var(--ease) both}
+.kbtn.eye{min-width:46px;padding:0}
+
+/* live: fading glass, orb, corner glow */
+.aura .lvcard{position:relative;isolation:isolate;overflow:hidden;background:linear-gradient(to top,rgba(var(--gr),.94),rgba(var(--gr),.6))!important;box-shadow:0 20px 60px rgba(0,0,0,.5),0 0 44px rgba(var(--ac1),.2)!important;animation:slideUp .35s var(--ease) both}
+.lvmid{display:grid;place-items:center;transition:transform .2s var(--ease)}.lvmid:active{transform:scale(.97)}
+.lvorb{position:absolute;left:50%;top:50%;width:132px;height:132px;margin:-66px 0 0 -66px;border-radius:50%;pointer-events:none;background:radial-gradient(circle,rgba(var(--ac1),.6),rgba(var(--ac2),.2) 55%,transparent 72%);filter:blur(7px);animation:orbPulse 3.4s ease-in-out infinite}
+.lvring{position:absolute;left:50%;top:50%;width:84px;height:84px;margin:-42px 0 0 -42px;border-radius:50%;pointer-events:none;box-shadow:0 0 0 1.5px rgba(var(--ac3),.55);opacity:0}
+.ph-listening .lvring{animation:ringOut 2.4s ease-out infinite}
+.ph-thinking .lvorb{animation-duration:1.1s;background:radial-gradient(circle,rgba(var(--ac3),.6),rgba(var(--ac1),.2) 55%,transparent 72%)}
+.ph-speaking .lvorb{animation-duration:1.7s;background:radial-gradient(circle,rgba(var(--ac2),.62),rgba(var(--ac1),.22) 55%,transparent 72%)}
+.lvcard.muted .lvorb{filter:grayscale(1) blur(7px);opacity:.4;animation:none}
+.lvbtns .ib{box-shadow:inset 0 0 0 1px rgba(var(--fr),.14);transition:transform .18s var(--ease),box-shadow .25s,background .2s}
+.lvbtns .ib:hover,.lvbtns .ib.lit{box-shadow:inset 0 0 0 1px rgba(var(--ac1),.7),0 0 20px rgba(var(--ac1),.4)}
+.lvc{font-weight:500;letter-spacing:-.01em}
+
+/* assistant gesture: borderless, fading into the screen, touching both bottom corners */
+.aura.asst .lv{inset:0;padding:0;align-items:stretch}
+.aura.asst .lvcard{width:100%;height:100%;gap:14px;justify-content:flex-end;border-radius:0!important;background:none!important;-webkit-backdrop-filter:none!important;backdrop-filter:none!important;box-shadow:none!important;overflow:visible;padding:24px 20px 38px}
+.aura.asst .lvcard::before{content:"";position:absolute;inset:0;z-index:-2;background:linear-gradient(to top,rgba(var(--gr),.97) 0%,rgba(var(--gr),.9) 32%,rgba(var(--gr),.5) 66%,transparent 100%);-webkit-backdrop-filter:blur(26px) saturate(150%)!important;backdrop-filter:blur(26px) saturate(150%)!important;-webkit-mask-image:linear-gradient(to top,#000 0%,#000 50%,transparent 100%);mask-image:linear-gradient(to top,#000 0%,#000 50%,transparent 100%)}
+.aura.asst .lvcard::after{content:"";position:absolute;left:0;right:0;bottom:0;height:55%;z-index:-1;pointer-events:none;background:radial-gradient(70% 70% at 0% 100%,rgba(var(--ac1),.38),transparent 70%),radial-gradient(70% 70% at 100% 100%,rgba(var(--ac2),.32),transparent 70%);animation:cornerGlow 4s ease-in-out infinite}
+.aura.asst .lvmid{height:150px}
+.aura.asst .lvorb{width:170px;height:170px;margin:-85px 0 0 -85px}
+.aura.asst .lvc{font-size:17px;-webkit-line-clamp:3}
+.aura.asst .lvbtns{gap:18px}.aura.asst .lvbtns .ib{width:54px;height:54px}
+.aura.light.asst .lvcard{background:none!important}
+`;
 const CSS6 = `
 /* ── v2: smooth + minimal ───────────────────────────────── */
 .aura{--ease:cubic-bezier(.22,1,.36,1);--mbg:#111113;--gbg:linear-gradient(160deg,#1d1d21,#131315)}
@@ -3857,7 +3953,7 @@ function App({ assistant = false, onExit }: any) {
   }, [poke]); // eslint-disable-line
   const askRef = useRef<any>(undefined);
   const [open, setOpen] = useState<any>(false);
-  const [panel, setPanel] = useState<any>(false), [optOpen, setOptOpen] = useState<any>(false), [noKey, setNoKey] = useState<any>(false);
+  const [mdd, setMdd] = useState<any>(false), [panel, setPanel] = useState<any>(false), [optOpen, setOptOpen] = useState<any>(false), [noKey, setNoKey] = useState<any>(false);
   const [settings, setSettings] = useState<any>(false);
   
   const [copied, setCopied] = useState<any>(null);
@@ -3964,7 +4060,7 @@ function App({ assistant = false, onExit }: any) {
     try {
       const needLive = LIVE.test(history[history.length - 1]?.text || "");
       const r = await runAgent(history, {
-        model, key: getKey(), signal: c.signal, voice, stream: voice, think: cfg.think, search: cfg.search || needLive, agent: cfg.agent || needLive,
+        model, key: getKey(), signal: c.signal, voice, stream: voice, think: voice ? false : cfg.think, search: cfg.search || needLive, agent: cfg.agent || needLive,
         ctx: { name: prof.name, about: prof.about, mem: prof.mem, mcp: cfg.mcp, remember },
         onRetry: (n) => patch({ retry: n }),
         onStep: (tr) => patch({ trace: tr, step: tr.filter((x) => x.state === "run").pop()?.label || "" }),
@@ -4092,7 +4188,7 @@ function App({ assistant = false, onExit }: any) {
 
   return (
     <div className={"aura" + (cfg.theme === "light" ? " light" : "") + (cfg.calm ? " calm" : "") + (live ? " islive" : "") + (assistant ? " asst" : "") + " fs-" + (cfg.fs || "m")} style={{ ...(cfg.accent && cfg.accent !== "#ffffff" ? { "--lc": cfg.accent } : {}), "--ff": fontOf(cfg.font).css } as any} ref={root}>
-      <style>{CSS + CSS2 + CSS3 + CSS4 + CSS5 + CSS6}</style>
+      <style>{CSS + CSS2 + CSS3 + CSS4 + CSS5 + CSS6 + CSS7}</style>
 
 
       <div className="scroll" ref={scroll}>
@@ -4106,9 +4202,11 @@ function App({ assistant = false, onExit }: any) {
       <div className="fade-b" />
       {far && msgs.length > 0 && <button className="glass ib fab pop" aria-label="Scroll to latest" onClick={() => { stick.current = true; scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: "smooth" }); }}><ArrowDown size={18} {...ico} /></button>}
 
-      <header className={"eptBar" + (hv || panel ? "" : " dim")} onClickCapture={(e) => { if (wasDim.current) { wasDim.current = false; e.stopPropagation(); e.preventDefault(); } }}>
-        <div className="eptL"><button className="hb" aria-label="Chats" onClick={() => { setPanel("chats"); }}><PanelLeft size={20} {...ico} /></button></div>
-        <button className="htitle" aria-label="Models" onClick={() => setPanel("models")}><Mark size={15} /><span>{model.n}</span><ChevronDown size={15} {...ico} /></button>
+      {mdd && <div className="mdscrim" onClick={() => setMdd(false)} />}
+      <header className={"eptBar" + (hv || panel || mdd ? "" : " dim")} onClickCapture={(e) => { if (wasDim.current) { wasDim.current = false; e.stopPropagation(); e.preventDefault(); } }}>
+        <div className="eptL"><button className="hb" aria-label="Chats" onClick={() => { setMdd(false); setPanel("chats"); }}><PanelLeft size={20} {...ico} /></button></div>
+        <div className="mddw"><button className={"htitle" + (mdd ? " open" : "")} aria-label="Models" aria-expanded={!!mdd} onClick={() => setMdd(!mdd)}><Mark size={15} /><span>{model.n}</span><ChevronDown size={15} {...ico} style={{ transition: "transform .25s ease", transform: mdd ? "rotate(180deg)" : "none" }} /></button>
+          {mdd && <div className="mdd" role="listbox">{MODELS.map((m) => <button key={m.id} role="option" aria-selected={m.id === model.id} className={m.id === model.id ? "on" : ""} onClick={() => { setCfg({ model: m.id }); setMdd(false); }}><div><b>{m.n}</b><span>{m.d}</span></div>{m.id === model.id && <Check size={16} {...ico} />}</button>)}</div>}</div>
         <div className="eptR">
           <button className="hb" aria-label="New chat" onClick={newChat}><NewChatIcon size={20} /></button>
           <button className="hb" aria-label="Settings" onClick={() => { setPanel(false); setSettings(true); }}><Settings2 size={20} {...ico} /></button>
@@ -4250,7 +4348,7 @@ function EpiqueSheet({ ref: hostRef, assistant }: HostProps) {
   };
   const full = h > 0.98;
   if (assistant) return (
-    <div style={{ all: "initial", position: "absolute", inset: 0, display: "block", background: "#0a0a0a" }}>
+    <div style={{ all: "initial", position: "absolute", inset: 0, display: "block", background: "transparent" }}>
       <div ref={ref} style={{ all: "initial", position: "absolute", inset: 0, display: "block" }}>{sr && createPortal(appEl, sr)}</div>
     </div>
   );
