@@ -1,0 +1,88 @@
+diff --git a/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt b/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt
+index 125ad1d..34b6063 100644
+--- a/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt
++++ b/node_modules/@expo/dom-webview/android/src/main/java/expo/modules/webview/DomWebView.kt
+@@ -4,15 +4,22 @@ package expo.modules.webview
+ 
+ import android.animation.ObjectAnimator
+ import android.annotation.SuppressLint
++import android.content.ActivityNotFoundException
+ import android.content.Context
++import android.content.Intent
+ import android.graphics.Bitmap
+ import android.graphics.Color
++import android.net.Uri
+ import android.os.Build
++import android.os.Message
+ import android.view.MotionEvent
+ import android.view.View
+ import android.view.View.OnTouchListener
+ import android.view.ViewGroup
++import android.webkit.PermissionRequest
+ import android.webkit.RenderProcessGoneDetail
++import android.webkit.WebChromeClient
++import android.webkit.WebResourceRequest
+ import android.webkit.WebView
+ import android.webkit.WebViewClient
+ import expo.modules.core.logging.LogHandlers
+@@ -198,14 +205,60 @@ internal class DomWebView(context: Context, appContext: AppContext) : ExpoView(c
+       // API 30+ default disables file access; DOM bundles need it for sibling assets.
+       settings.allowFileAccess = true
+       settings.allowFileAccessFromFileURLs = true
++      // Epique: localStorage persistence, mic/camera for getUserMedia, window.open / target=_blank / tel: links.
++      settings.domStorageEnabled = true
++      settings.setSupportMultipleWindows(true)
+       webViewClient = createWebViewClient()
++      webChromeClient = createWebChromeClient()
+       addJavascriptInterface(rncWebViewBridge, "ReactNativeWebView")
+       addJavascriptInterface(DomWebViewBridge(this@DomWebView), "ExpoDomWebViewBridge")
+       setOnTouchListener(this@DomWebView)
+     }
+   }
+ 
++  private fun openExternal(uri: Uri?): Boolean {
++    if (uri == null) return true
++    try {
++      context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
++    } catch (_: ActivityNotFoundException) {
++    } catch (_: SecurityException) {
++    }
++    return true
++  }
++
++  private fun createWebChromeClient() = object : WebChromeClient() {
++    // Android runtime permissions (RECORD_AUDIO / CAMERA) are requested from JS before getUserMedia runs.
++    override fun onPermissionRequest(request: PermissionRequest?) {
++      val req = request ?: return
++      post { req.grant(req.resources) }
++    }
++
++    override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean {
++      val msg = resultMsg ?: return false
++      val transport = msg.obj as? WebView.WebViewTransport ?: return false
++      val popup = WebView(context)
++      popup.webViewClient = object : WebViewClient() {
++        override fun shouldOverrideUrlLoading(v: WebView?, r: WebResourceRequest?): Boolean = openExternal(r?.url)
++        override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
++          v?.stopLoading()
++          if (url != null && url != "about:blank") openExternal(Uri.parse(url))
++        }
++      }
++      transport.webView = popup
++      msg.sendToTarget()
++      return true
++    }
++  }
++
+   private fun createWebViewClient() = object : WebViewClient() {
++    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
++      val uri = request?.url ?: return false
++      return when (uri.scheme) {
++        "tel", "sms", "smsto", "mailto", "geo", "intent", "market" -> openExternal(uri)
++        else -> false
++      }
++    }
++
+     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+       super.onPageStarted(view, url, favicon)
+       if (this@DomWebView.useExpoModulesBridge) {

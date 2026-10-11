@@ -1,8 +1,9 @@
+import { AppRegistry } from 'react-native';
 import { registerRootComponent } from 'expo';
 
 import App from './App';
+import Assistant from './Assistant';
 
-// registerRootComponent calls AppRegistry.registerComponent('main', () => App);
-// It also ensures that whether you load the app in Expo Go or in a native build,
-// the environment is set up appropriately
+// "main" is the normal app; "assistant" is rendered by AssistantActivity when the system assistant gesture fires.
+AppRegistry.registerComponent('assistant', () => Assistant);
 registerRootComponent(App);

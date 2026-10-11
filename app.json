@@ -1,13 +1,14 @@
 {
   "expo": {
-    "name": "epique-twin",
+    "name": "Epique AI",
     "slug": "epique-twin",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "tech.epique.ai"
     },
     "android": {
       "adaptiveIcon": {
@@ -16,10 +17,34 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "tech.epique.ai",
+      "permissions": [
+        "RECORD_AUDIO",
+        "CAMERA",
+        "MODIFY_AUDIO_SETTINGS"
+      ],
+      "softwareKeyboardLayoutMode": "resize"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
-    }
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "single"
+    },
+    "scheme": "epique",
+    "plugins": [
+      "./plugins/withEpiqueAssistant",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Epique AI listens when you use voice.",
+          "speechRecognitionPermission": "Epique AI turns your speech into text.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox",
+            "com.google.android.as"
+          ]
+        }
+      ]
+    ]
   }
 }
